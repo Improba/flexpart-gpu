@@ -1,31 +1,31 @@
 # NOTICE - FLEXPART-GPU
 
-## Origine du projet
+## Project origin
 
-`flexpart-gpu` est un port Rust/WebGPU de composants de FLEXPART.
-Les concepts scientifiques, schemas physiques et une partie des structures algorithmiques proviennent du projet FLEXPART d'origine.
+`flexpart-gpu` is a Rust/WebGPU port of FLEXPART components.
+The scientific concepts, physical schemes, and part of the algorithmic structures originate from the upstream FLEXPART project.
 
-## Reference amont
+## Upstream reference
 
-- Projet d'origine: FLEXPART
-- Licence amont observee dans ce workspace: `GPL-3.0-or-later`
-- Fichier de licence amont: `../flexpart/LICENSE`
+- Original project: FLEXPART
+- Upstream license observed in this workspace: `GPL-3.0-or-later`
+- Upstream license file: `../flexpart/LICENSE`
 
-## Regles de distribution
+## Distribution rules
 
-Pour toute publication/distribution de ce projet:
+For any publication/distribution of this project:
 
-1. Conserver une licence `GPL-3.0-or-later` (ou compatible selon les termes GPL).
-2. Conserver les notices de copyright et de licence existantes.
-3. Signaler clairement les modifications et ajouts du port Rust/WebGPU.
-4. Fournir le code source correspondant lors de la distribution de binaires.
-5. Eviter toute presentation laissant penser que ce projet remplace la validation scientifique historique de FLEXPART.
+1. Maintain a `GPL-3.0-or-later` license (or compatible under GPL terms).
+2. Preserve existing copyright and license notices.
+3. Clearly identify modifications and additions from the Rust/WebGPU port.
+4. Provide the corresponding source code when distributing binaries.
+5. Avoid any presentation suggesting this project replaces the historical scientific validation of FLEXPART.
 
-## Note sur le port assiste par IA
+## Note on AI-assisted porting
 
-Le recours a des outils d'IA pour aider la traduction/portage n'affecte pas les obligations de licence applicables aux oeuvres derivees.
+The use of AI tools to assist with translation/porting does not affect the license obligations applicable to derivative works.
 
-## Contact projet
+## Project contact
 
 Sylvain Meylan (Improba)  
 Email: `A_RENSEIGNER`

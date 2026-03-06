@@ -1,38 +1,45 @@
 # FLEXPART-GPU
 
-Port Rust/WebGPU de FLEXPART pour exploration scientifique, validation numerique et evaluation des performances CPU (Fortran/Rust) vs GPU.
+Rust/WebGPU port of FLEXPART for scientific exploration, numerical validation, and CPU (Fortran/Rust) vs GPU performance evaluation.
 
-## Contexte
+## Context
 
-Ce projet re-implemente des composants de FLEXPART en Rust et WGSL, avec un focus sur:
+This project re-implements FLEXPART components in Rust and WGSL, with a focus on:
 
-- la reproductibilite des experiences,
-- la comparaison de sorties entre implementation historique et port GPU,
-- la mesure de performances sur des tailles de problemes significatives.
+- experiment reproducibility,
+- output comparison between the legacy implementation and the GPU port,
+- performance measurement at significant problem sizes.
 
-## Licence et implications
+## License and implications
 
-FLEXPART amont est distribue sous licence `GPL-3.0-or-later`.
-Le present projet est donc publie sous `GPL-3.0-or-later` egalement.
+Upstream FLEXPART is distributed under `GPL-3.0-or-later`.
+This project is therefore also published under `GPL-3.0-or-later`.
 
-Implications pratiques pour la distribution:
+Practical implications for distribution:
 
-- ce port doit rester sous licence compatible GPL;
-- si des binaires sont distribues, le code source correspondant doit etre fourni;
-- les notices de copyright/licence et attributions amont doivent etre conservees;
-- les modifications doivent etre clairement identifiees;
-- l'assistance IA au portage n'annule pas les obligations de la licence.
+- this port must remain under a GPL-compatible license;
+- if binaries are distributed, the corresponding source code must be provided;
+- upstream copyright/license notices and attributions must be preserved;
+- modifications must be clearly identified;
+- AI-assisted porting does not waive license obligations.
 
 ## Attribution
 
-Ce projet reconnait explicitement l'origine scientifique et logicielle de FLEXPART.
-Le credit principal des fondations modeles, des methodes et de la validation scientifique revient a l'equipe FLEXPART.
+This project explicitly acknowledges the scientific and software origins of FLEXPART.
+Primary credit for the model foundations, methods, and scientific validation goes to the FLEXPART team.
 
-Voir `NOTICE.md` pour les details d'attribution et de conformite.
+See `NOTICE.md` for attribution and compliance details.
 
 ## Benchmarks
 
-La methode de benchmark et les commandes recommandees sont documentees dans `docs/benchmarks.md`.
+The benchmark methodology and recommended commands are documented in `docs/benchmarks.md`.
+
+## Documentation
+
+- Scientific foundations of the model: [`docs/science/`](docs/science/README.md)
+- ETEX simulation quickstart: [`docs/quickstart.md`](docs/quickstart.md)
+- Synthetic validation report: [`docs/validation-report.md`](docs/validation-report.md)
+- Detailed ETEX report (work in progress): [`docs/temp/phase-d-etex-report.md`](docs/temp/phase-d-etex-report.md)
 
 ## Contact
 

@@ -22,6 +22,11 @@ for emergency response (industrial accidents, Seveso sites).
 - **Constants over magic numbers**: all physical constants and tuning parameters
   must be named constants with units in the name or doc-comment.
 
+### Language
+
+- **All code comments, doc-comments, documentation files, and commit messages
+  must be written in English.** No exceptions.
+
 ### Documentation
 
 - Every public function, struct, and module gets a `///` doc-comment explaining
@@ -73,8 +78,10 @@ for emergency response (industrial accidents, Seveso sites).
 tests/
 ├── unit/              # Pure function tests (interpolation, Hanna, RNG)
 ├── integration/       # Multi-step tests (advection + turbulence pipeline)
-├── validation/        # Comparison against FLEXPART Fortran reference output
-└── benchmarks/        # Performance benchmarks (criterion)
+└── validation/        # Comparison against FLEXPART Fortran reference output
+
+benches/               # Performance benchmarks (criterion) — at crate root, not under tests/
+└── advection.rs
 ```
 
 ### Test Naming
@@ -88,6 +95,9 @@ tests/
 
 - **Commits**: imperative mood, concise subject line. Body references the Fortran
   source or scientific paper when relevant.
+- **Commit language policy**: commit subject and body must be written in English.
+  If a non-English commit message is discovered in local history, rewrite it to
+  English before sharing the branch.
 - **Branches**: `feat/`, `fix/`, `refactor/`, `bench/`, `docs/` prefixes.
 - **PR descriptions**: state what Fortran routine is being ported and how validation
   was performed.
@@ -98,10 +108,11 @@ tests/
 
 ### Model requirement
 
-All sub-agents **must** use **GPT 5.3 Codex High**. This project involves
-scientific computing (atmospheric physics, GPU kernel programming, Fortran→Rust
-translation) that requires strong reasoning capabilities. Lighter models may
-only be used for trivial tasks (formatting, file moves, renaming).
+All sub-agents **must** use the **most capable model available**. This project
+involves scientific computing (atmospheric physics, GPU kernel programming,
+Fortran→Rust translation) that requires strong reasoning capabilities. Lighter
+or faster models may only be used for trivial tasks (formatting, file moves,
+renaming).
 
 ### Per-task protocol
 
