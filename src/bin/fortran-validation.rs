@@ -8,6 +8,7 @@ use flexpart_gpu::gpu::{
     ConcentrationGridShape, ConcentrationGriddingParams, GpuError, MAX_OUTPUT_LEVELS,
 };
 use flexpart_gpu::io::TimeBoundsBehavior;
+use flexpart_gpu::particles::Particle;
 use flexpart_gpu::physics::VelocityToGridScale;
 use flexpart_gpu::simulation::{
     ForwardStepForcing, ForwardTimeLoopConfig, ForwardTimeLoopDriver, MetTimeBracket,
@@ -60,6 +61,7 @@ const BLH_M: f32 = 3000.0;
 struct ValidationOutput {
     grid: GridInfo,
     particle_count_per_cell: Vec<u32>,
+    particle_count_per_cell_host_gridding: Vec<u32>,
     concentration_mass_kg: Vec<f32>,
     total_particles_active: usize,
     total_steps: usize,
@@ -106,12 +108,17 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(PARTICLE_COUNT);
 
+    let sync_readback = std::env::var("SYNC_READBACK")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+
     eprintln!("=== fortran-validation (GPU) ===");
     eprintln!("domain: {OUT_NX}x{OUT_NY}x{OUT_NZ}, dx={OUT_DX}°, dy={OUT_DY}°");
     eprintln!("origin: ({OUTLON0}, {OUTLAT0})");
     eprintln!("wind: u={U_WIND}, v={V_WIND}, w={W_WIND} m/s");
     eprintln!("release: ({RELEASE_LON}, {RELEASE_LAT}), z={RELEASE_Z}m, {particle_count} particles");
     eprintln!("simulation: {START_TS} → {END_TS}, dt={DT_SECONDS}s");
+    eprintln!("sync_readback: {sync_readback}");
 
     let center_lat = RELEASE_LAT as f32;
     let lat_rad = (center_lat as f64) * std::f64::consts::PI / 180.0;
@@ -162,7 +169,7 @@ fn main() {
         timestep_seconds: DT_SECONDS,
         time_bounds_behavior: TimeBoundsBehavior::Clamp,
         velocity_to_grid_scale: velocity_scale,
-        sync_particle_store_each_step: true,
+        sync_particle_store_each_step: sync_readback,
         collect_deposition_probabilities_each_step: false,
         ..ForwardTimeLoopConfig::default()
     };
@@ -292,6 +299,12 @@ fn main() {
 
     let total_count: u32 = conc.particle_count_per_cell.iter().sum();
     eprintln!("total gridded particles: {total_count}");
+    let host_binned_counts = {
+        let store = driver.particle_store();
+        bin_particles_to_output_grid(store.as_slice())
+    };
+    let total_host_binned: u32 = host_binned_counts.iter().sum();
+    eprintln!("total host-gridded particles: {total_host_binned}");
 
     let output = ValidationOutput {
         grid: GridInfo {
@@ -305,6 +318,7 @@ fn main() {
             heights_m: OUTHEIGHTS.to_vec(),
         },
         particle_count_per_cell: conc.particle_count_per_cell,
+        particle_count_per_cell_host_gridding: host_binned_counts,
         concentration_mass_kg: conc.concentration_mass_kg,
         total_particles_active: active,
         total_steps,
@@ -347,4 +361,31 @@ fn build_surface_fields(nx: usize, ny: usize) -> SurfaceFields {
     s.tropopause_height_m.fill(10_000.0);
     s.inv_obukhov_length_per_m.fill(0.0);
     s
+}
+
+fn bin_particles_to_output_grid(particles: &[Particle]) -> Vec<u32> {
+    let mut grid = vec![0_u32; OUT_NX * OUT_NY * OUT_NZ];
+    for particle in particles.iter().filter(|p| p.is_active()) {
+        let lon = OUTLON0 + (particle.cell_x as f64 + particle.pos_x as f64) * OUT_DX;
+        let lat = OUTLAT0 + (particle.cell_y as f64 + particle.pos_y as f64) * OUT_DY;
+        let z = particle.pos_z;
+
+        let ix = ((lon - OUTLON0) / OUT_DX) as isize;
+        let iy = ((lat - OUTLAT0) / OUT_DY) as isize;
+        if !(0..OUT_NX as isize).contains(&ix) || !(0..OUT_NY as isize).contains(&iy) {
+            continue;
+        }
+
+        let mut iz = OUT_NZ - 1;
+        for (kz, &height_m) in OUTHEIGHTS.iter().enumerate() {
+            if z <= height_m {
+                iz = kz;
+                break;
+            }
+        }
+
+        let flat = ((ix as usize * OUT_NY) + iy as usize) * OUT_NZ + iz;
+        grid[flat] = grid[flat].saturating_add(1);
+    }
+    grid
 }

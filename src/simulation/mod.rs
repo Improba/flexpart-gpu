@@ -9,5 +9,5 @@ pub use timeloop::{
     BackwardReceptorConfig, BackwardSourceCollection, BackwardSourceRegionConfig,
     BackwardStepReport, BackwardTimeLoopConfig, BackwardTimeLoopDriver, ForwardSpatialSortConfig,
     ForwardStepForcing, ForwardStepReport, ForwardTimeLoopConfig, ForwardTimeLoopDriver,
-    MetTimeBracket, ParticleForcingField, TimeDirection, TimeLoopError,
+    MetTimeBracket, ParticleForcingField, StepTimingReport, TimeDirection, TimeLoopError,
 };

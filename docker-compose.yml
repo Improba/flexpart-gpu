@@ -21,21 +21,6 @@ services:
       CARGO_HOME: "/usr/local/cargo"
     command: ["bash"]
 
-  flexpart-fortran:
-    build:
-      context: ./docker
-      dockerfile: Dockerfile.fortran
-    image: flexpart-fortran:latest
-    working_dir: /workspace
-    user: "${UID:-1000}:${GID:-1000}"
-    stdin_open: true
-    tty: true
-    volumes:
-      - ../flexpart:/workspace/flexpart
-      - .:/workspace/flexpart-gpu:ro
-      - ./target/comparison:/workspace/comparison
-    command: ["bash"]
-
 volumes:
   cargo-home:
   cargo-target:

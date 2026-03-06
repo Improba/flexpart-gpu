@@ -548,6 +548,7 @@ fn maybe_run_workgroup_autotune(runtime: BenchRuntimeConfig, ctx: &GpuContext) {
                 std::hint::black_box(output);
                 Ok(started.elapsed())
             }
+            _ => Err(format!("kernel {kernel:?} not benchmarked in autotune")),
         }
     });
 

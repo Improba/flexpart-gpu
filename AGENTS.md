@@ -117,11 +117,14 @@ renaming).
 ### Per-task protocol
 
 1. Read this file before starting any task.
-2. Read `docs/temp/implementation-plan.md` for the task matrix and architecture.
+2. Read the relevant task matrix:
+   - **Initial build** (Phases 0–7): `docs/temp/implementation-plan.md`
+   - **Performance optimization** (Tiers 1–3): `docs/temp/optimisation-task-matrix.md`
+     (rationale in `docs/temp/gpu-optimisation-plan.md`)
 3. For benchmarking/performance tasks, read `docs/benchmarks.md` first and follow
    its methodology (scenario sizing, warm-up/sample settings, and GPU/CPU recipe separation).
 4. Claim tasks by updating the task matrix before starting work.
 5. Read the referenced Fortran source to understand the algorithm being ported.
 6. Write tests before or alongside the implementation (not after).
 7. Run `cargo clippy` and `cargo test` before marking a task as done.
-8. Document any deviation from the Fortran reference in `docs/conventions/`.
+8. Document any deviation from the Fortran reference in `docs/scientific-changelog.md`.

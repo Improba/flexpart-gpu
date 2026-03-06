@@ -178,5 +178,127 @@ concentration_gridding — each with GPU and CPU variants.
 | `FLEXPART_BENCH_AUTOTUNE_CANDIDATES` | — | Comma-separated candidate workgroup sizes. |
 | `FLEXPART_WG_AUTOTUNE_DETERMINISTIC` | `1` | Deterministic tie-breaking in auto-tune. |
 | `FLEXPART_WG_AUTOTUNE_CACHE` | `~/.cache/flexpart-gpu/…` | Override auto-tune cache path. |
+| `FLEXPART_GPU_VALIDATION` | `0` | `1` = use separated Hanna → Langevin dispatches instead of fused production path. |
 
 If no GPU adapter is available, GPU groups emit a placeholder entry; CPU baselines still run.
+
+---
+
+## Fortran comparison benchmarks
+
+In addition to the Criterion micro-benchmarks above, the project includes a
+**Fortran FLEXPART vs GPU end-to-end comparison** using the `fortran-validation`
+binary and the `compare-fortran.sh` orchestration script. Both engines run on an
+identical synthetic scenario; comparison scripts produce statistical metrics and
+particle position comparisons.
+
+### Prerequisites
+
+1. Docker with `docker compose` (for the Fortran side).
+2. The Fortran Docker image must be built:
+   ```bash
+   cd ../flexpart-fortran-docker && docker compose build
+   ```
+3. The Fortran FLEXPART binary must be compiled (done once during setup):
+   ```bash
+   scripts/compare-fortran.sh compose setup
+   ```
+
+### Quick performance benchmark (GPU only)
+
+Measures GPU end-to-end time at 1M particles, no Fortran needed:
+
+```bash
+# Production mode (readback off) — measures pure GPU pipeline
+OUTPUT_PATH=/dev/null PARTICLES=1000000 SYNC_READBACK=0 \
+  /usr/bin/time -f 'REAL_SECONDS=%e' \
+  cargo run --release --bin fortran-validation
+
+# Validation mode (readback on) — includes GPU→CPU transfer at each step
+OUTPUT_PATH=/dev/null PARTICLES=1000000 SYNC_READBACK=1 \
+  /usr/bin/time -f 'REAL_SECONDS=%e' \
+  cargo run --release --bin fortran-validation
+```
+
+### Quick kernel-level benchmark
+
+Measures per-step GPU compute time with deposition, spatially-varying met:
+
+```bash
+PARTICLES=1000000 WARMUP_STEPS=5 MEASURE_STEPS=30 \
+  cargo run --release --bin bench-timeloop
+```
+
+### Full Fortran vs GPU comparison (performance + science)
+
+Run both engines and produce a scientific comparison:
+
+```bash
+# Step 1: Run GPU with readback on (exports particle positions)
+OUTPUT_PATH=target/validation/gpu_1m_readback_on.json \
+PARTICLES=1000000 SYNC_READBACK=1 \
+  /usr/bin/time -f 'REAL_SECONDS=%e' \
+  cargo run --release --bin fortran-validation
+
+# Step 2: Set Fortran particle count to match
+# Edit ../flexpart-fortran-docker/comparison/validate_run/options/RELEASES
+# Set PARTS = 1000000
+
+# Step 3: Run Fortran
+cd ../flexpart-fortran-docker
+/usr/bin/time -f 'REAL_SECONDS=%e' \
+  docker compose run --rm flexpart-fortran bash -c \
+  'cd /workspace/comparison/validate_run && /workspace/flexpart/src/FLEXPART'
+cd ../flexpart-gpu
+
+# Step 4: Run scientific comparison (partposit-based)
+.venv/bin/python scripts/compare_concentrations.py \
+  --fortran-output ../flexpart-fortran-docker/comparison/validate_run/output \
+  --gpu-output target/validation/gpu_1m_readback_on.json \
+  --output-json target/validation/comparison_1m_report.json \
+  --verbose
+
+# Step 5: Run clean aligned comparison (same gridding operator)
+.venv/bin/python scripts/compare_clean_partposit.py \
+  --repo-root . \
+  --fortran-output ../flexpart-fortran-docker/comparison/validate_run/output \
+  --gpu-output target/validation/gpu_1m_readback_on.json \
+  --output-json target/validation/comparison_1m_clean_report.json
+```
+
+### Automated Fortran validation (all-in-one)
+
+The `compare-fortran.sh` script automates the full workflow:
+
+```bash
+# Full setup + Fortran run + GPU tests
+scripts/compare-fortran.sh compose all
+
+# Scientific validation only (builds, runs, compares)
+scripts/compare-fortran.sh compose validate
+```
+
+### Environment variables for `fortran-validation`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARTICLES` | `10000` | Number of particles to release |
+| `OUTPUT_PATH` | `target/validation/gpu_concentration.json` | Output JSON path |
+| `SYNC_READBACK` | `1` | `0` = fire-and-forget (production), `1` = full readback each step (validation) |
+
+### Environment variables for `bench-timeloop`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARTICLES` | `1000000` | Number of particles |
+| `WARMUP_STEPS` | `3` | Warm-up steps (not measured) |
+| `MEASURE_STEPS` | `20` | Steps to measure |
+| `TIMESTEP_SECONDS` | `1` | Simulation timestep |
+
+### Reports
+
+Detailed benchmark results are in `docs/temp/`:
+
+- [`benchmark-performance-scaling.md`](temp/benchmark-performance-scaling.md) — particle count scaling (10K–1M), GPU vs Fortran serial, readback on/off, MPI context.
+- [`benchmark-1m-fortran-vs-gpu0.md`](temp/benchmark-1m-fortran-vs-gpu0.md) — scientific comparison at 1M particles (clean aligned gridding, COM, correlation, known differences).
+- [`benchmark-scientific-validation.md`](temp/benchmark-scientific-validation.md) — physics-focused validation report: advection, vertical/horizontal diffusion, vertical profile analysis, aligned physics inventory.

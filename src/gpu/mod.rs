@@ -7,30 +7,42 @@ use thiserror::Error;
 pub mod advection;
 pub mod buffers;
 pub mod cbl;
+pub mod compaction;
 pub mod convection;
 pub mod deposition;
 pub mod gridding;
 pub mod hanna;
 pub mod interpolation;
 pub mod langevin;
+pub mod langevin_fused;
+pub mod particle_step;
+pub mod pbl;
 pub mod pbl_reflection;
 pub mod preflight;
 pub mod rng;
 pub mod wet_deposition;
 pub mod workgroup;
 pub use advection::{
-    advect_particles_gpu, advect_particles_gpu_with_sampling,
-    dispatch_advection_gpu_with_sampling_and_kernel, encode_advection_gpu_with_kernel,
-    resolve_wind_sampling_path, AdvectionBufferDispatchKernel, AdvectionDispatchKernel,
-    AdvectionTextureDispatchKernel, GpuAdvectionError, WindSamplingOptions, WindSamplingPath,
+    advect_particles_dual_wind_gpu, advect_particles_gpu, advect_particles_gpu_with_sampling,
+    dispatch_advection_gpu_with_sampling_and_kernel,
+    encode_advection_dual_wind_gpu_with_kernel, encode_advection_gpu_with_kernel,
+    resolve_dual_wind_sampling_path, resolve_wind_sampling_path,
+    AdvectionBufferDispatchKernel, AdvectionDispatchKernel,
+    AdvectionDualWindBufferDispatchKernel, AdvectionDualWindDispatchKernel,
+    AdvectionDualWindTextureDispatchKernel, AdvectionTextureDispatchKernel,
+    DualWindAdvectionParams, GpuAdvectionError, WindSamplingOptions, WindSamplingPath,
 };
 pub use buffers::{
-    download_buffer_bytes, download_buffer_typed, GpuBufferError, GpuBufferManager,
-    ParticleBuffers, PblBuffers, PblHostData, WindBuffers, WindHostData,
+    download_buffer_bytes, download_buffer_typed, DualWindBuffers, GpuBufferError,
+    GpuBufferManager, ParticleBuffers, PblBuffers, PblHostData, WindBuffers, WindHostData,
 };
 pub use cbl::{
     sample_cbl_vertical_velocity_gpu, sample_cbl_vertical_velocity_workflow, CblSamplingInput,
     CblSamplingOutput, GpuCblError, GpuCblWorkflowError,
+};
+pub use compaction::{
+    compact_active_particles, encode_compaction, encode_compaction_with_reorder,
+    CompactionBuffers, CompactionPipelines, CompactionResult, GpuCompactionError,
 };
 pub use convection::{
     apply_convective_mixing_step_workflow, dispatch_convective_mixing_gpu, GpuConvectionError,
@@ -62,6 +74,24 @@ pub use langevin::{
     update_particles_turbulence_langevin_gpu_with_hanna_buffer,
     update_particles_turbulence_langevin_gpu_with_hanna_buffer_and_kernel, GpuLangevinError,
     LangevinDispatchKernel,
+};
+pub use langevin_fused::{
+    encode_langevin_fused_gpu, GpuLangevinFusedError, LangevinFusedDispatchKernel,
+};
+// Mega-kernel (particle_step) is abandoned due to register pressure.
+// The production path uses langevin_fused + separate advection/deposition.
+// Kept for reference and testing only.
+pub use particle_step::{
+    dispatch_particle_step_gpu, encode_particle_step_gpu,
+    encode_particle_step_gpu_persistent, supports_mega_kernel,
+    GpuParticleStepError, PackedDepositionBuffer, PackedPblBuffer,
+    ParticleStepDispatchKernel, ParticleStepInput, ParticleStepParams,
+    ParticleStepResources,
+};
+pub use pbl::{
+    dispatch_pbl_diagnostics_gpu, dispatch_pbl_diagnostics_gpu_with_kernel,
+    encode_pbl_diagnostics_gpu_with_kernel, GpuPblDiagnosticsError,
+    PblDiagnosticsDispatchKernel, SurfaceFieldBuffer,
 };
 pub use pbl_reflection::{
     encode_pbl_reflection_gpu_with_kernel, GpuPblReflectionError, PblReflectionDispatchKernel,
@@ -156,6 +186,8 @@ impl GpuContext {
         required_limits.max_buffer_size = adapter.limits().max_buffer_size;
         required_limits.max_storage_buffer_binding_size =
             adapter.limits().max_storage_buffer_binding_size;
+        required_limits.max_storage_buffers_per_shader_stage =
+            adapter.limits().max_storage_buffers_per_shader_stage;
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {

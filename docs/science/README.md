@@ -16,6 +16,7 @@ to the underlying literature.
 | [deposition.md](deposition.md) | Dry deposition (resistance model) and wet scavenging |
 | [concentration-gridding.md](concentration-gridding.md) | Mapping particle masses to Eulerian output grids |
 | [coordinate-system.md](coordinate-system.md) | Horizontal and vertical coordinate transforms |
+| [known-limitations.md](known-limitations.md) | Known limitations, simplifications, and open questions |
 
 ## Key References
 

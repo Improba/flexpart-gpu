@@ -101,10 +101,12 @@ mass_new = mass_old · (1 − P_wet)
 
 | File | Role |
 |------|------|
-| `src/shaders/dry_deposition.wgsl` | GPU dry deposition kernel |
-| `src/shaders/wet_deposition.wgsl` | GPU wet deposition kernel |
-| `src/physics/deposition.rs` | CPU dry deposition (resistance model) |
-| `src/physics/wet_scavenging.rs` | CPU wet scavenging |
+| `src/shaders/dry_deposition.wgsl` | GPU dry deposition kernel (both paths) |
+| `src/shaders/wet_deposition.wgsl` | GPU wet deposition kernel (both paths) |
+| `src/physics/deposition.rs` | CPU dry deposition (resistance model, reference) |
+| `src/physics/wet_scavenging.rs` | CPU wet scavenging (reference) |
+| `src/gpu/deposition.rs` | Dry deposition dispatch |
+| `src/gpu/wet_deposition.rs` | Wet deposition dispatch |
 
 ## References
 

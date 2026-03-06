@@ -31,22 +31,28 @@ equation (see [turbulent-diffusion.md](turbulent-diffusion.md)).
 The forward time loop processes each timestep `dt` in the following order:
 
 1. **Release** — inject new particles according to user-defined source terms.
-2. **Meteorological interpolation** — trilinear interpolation of wind and
-   surface fields to each particle's position and time.
+2. **Wind bracket upload** — when the simulation crosses a meteorological time
+   boundary, upload wind fields (t0, t1) to GPU. The GPU performs temporal
+   interpolation inline.
 3. **PBL diagnostics** — compute boundary-layer parameters (u\*, w\*, L, h)
-   from surface fields.
-4. **Advection** — Petterssen predictor–corrector step using mean wind
-   (see [advection.md](advection.md)).
-5. **Hanna parameterisation** — compute per-particle turbulence statistics
-   σ\_u, σ\_v, σ\_w and Lagrangian timescales T\_Lu, T\_Lv, T\_Lw.
-6. **Langevin step** — update turbulent velocities and apply vertical
-   displacement with sub-stepping and PBL reflection
-   (see [turbulent-diffusion.md](turbulent-diffusion.md)).
-7. **Dry deposition** — mass loss for particles near the surface
-   (see [deposition.md](deposition.md)).
-8. **Wet deposition** — mass loss from precipitation scavenging.
-9. **Concentration gridding** — accumulate surviving particle masses on the
+   per grid cell on GPU from uploaded surface fields.
+4. **Per-particle physics** (GPU) — in production mode, four dispatches per
+   step handle the physics:
+   - **Advection** — Petterssen predictor–corrector using mean wind
+     (see [advection.md](advection.md)).
+   - **Fused Hanna+Langevin** — inline Hanna PBL parameterisation followed by
+     Langevin turbulent velocity update with sub-stepping and PBL reflection
+     (see [turbulent-diffusion.md](turbulent-diffusion.md)).
+   - **Dry deposition** — mass loss near the surface
+     (see [deposition.md](deposition.md)).
+   - **Wet deposition** — mass loss from precipitation scavenging.
+5. **Concentration gridding** — accumulate surviving particle masses on the
    output grid (see [concentration-gridding.md](concentration-gridding.md)).
+
+In validation mode (`FLEXPART_GPU_VALIDATION=1`), the fused Hanna+Langevin
+dispatch is replaced by two separate dispatches (Hanna → Langevin), giving five
+separate GPU dispatches for easier comparison against Fortran. See
+[simulation-flow.md](simulation-flow.md) for the full execution sequence.
 
 ### Backward Mode
 

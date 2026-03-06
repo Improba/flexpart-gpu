@@ -589,6 +589,21 @@ impl ParticleStore {
         self.active_count = self.particles.iter().filter(|p| p.is_active()).count();
     }
 
+    /// Synchronize host-side bookkeeping after GPU compaction without
+    /// downloading the full particle buffer.
+    ///
+    /// After GPU gather/reorder, active particles occupy contiguous slots
+    /// `[0..active_count)` and all remaining slots are free. This method
+    /// updates `active_count` and rebuilds the free-slot stack accordingly,
+    /// keeping the host `ParticleStore` consistent for release-slot
+    /// assignment without the cost of a full GPU→CPU readback.
+    pub fn reset_after_compaction(&mut self, active_count: usize) {
+        self.active_count = active_count;
+        self.free_slots.clear();
+        self.free_slots
+            .extend((active_count..self.capacity).rev());
+    }
+
     /// Compute per-slot Morton keys for current particle positions.
     ///
     /// Active particles use quantized `grid_x/grid_y/pos_z`; inactive slots

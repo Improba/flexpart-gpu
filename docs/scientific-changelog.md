@@ -16,6 +16,43 @@ shaders, physics kernels, or advection logic must add an entry here.
 
 ## Entries
 
+### 2026-03-06 — Fused Hanna+Langevin default production path
+**Impact**: none (identical physics, different execution path)
+**Files**: `langevin_fused.wgsl`, `gpu/langevin_fused.rs`, `simulation/timeloop.rs`
+**Validation**: The production path fuses Hanna PBL turbulence parameterisation
+and Langevin velocity update into a single GPU dispatch (`langevin_fused.wgsl`),
+eliminating the intermediate HannaParams buffer and one dispatch barrier.
+Physics is identical to the separated shaders (verified by textual diff of
+every function). The separated Hanna → Langevin path is retained under
+`FLEXPART_GPU_VALIDATION=1` for scientific validation.
+
+*Note*: A full mega-kernel approach (advection + Hanna + Langevin + deposition
+in one dispatch) was attempted and abandoned due to severe register pressure
+on the target GPU. The mega-kernel source remains in `particle_step.wgsl` /
+`particle_step.rs` for reference only.
+
+### 2026-03-06 — GPU-side PBL diagnostics
+**Impact**: numerics (minor — f32 vs previous CPU f32, same formulas)
+**Files**: `pbl_diagnostics.wgsl`, `gpu/pbl.rs`, `simulation/timeloop.rs`
+**Validation**: PBL parameters (u*, w*, L, h) now computed on GPU per grid
+cell. Same formulas as CPU reference (`io/pbl_params.rs`). CPU reference
+retained for tests.
+
+### 2026-03-06 — GPU-side dual-wind temporal interpolation
+**Impact**: numerics (minor — interpolation order changed)
+**Files**: `advection_dual_wind.wgsl`, `advection_texture_dual_wind.wgsl`,
+`gpu/advection.rs`, `simulation/timeloop.rs`
+**Validation**: Wind brackets (t0, t1) uploaded once per met change. GPU
+performs `(1−α)·t0 + α·t1` inline during advection. Removes per-step CPU
+interpolation and wind re-upload. Interpolation result is mathematically
+identical (same linear formula).
+
+### 2026-03-06 — Active particle compaction
+**Impact**: none (reorders particle buffer, physics unchanged)
+**Files**: `compaction.wgsl`, `gpu/compaction.rs`, `simulation/timeloop.rs`
+**Validation**: Prefix-sum compaction packs active particles to the front
+of the buffer, reducing wasted GPU work on inactive particles.
+
 ### 2026-03-06 — hanna_short recalculation between sub-steps
 **Impact**: physics
 **Files**: `langevin.wgsl`

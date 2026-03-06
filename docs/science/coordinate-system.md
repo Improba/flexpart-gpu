@@ -90,4 +90,5 @@ Particles are binned by their `pos_z` into the appropriate output layer.
 | File | Role |
 |------|------|
 | `src/coords/mod.rs` | Coordinate transforms (Rust) |
-| `src/shaders/advection.wgsl` | Velocity-to-grid scaling in GPU kernel |
+| `src/shaders/advection_texture_dual_wind.wgsl` | Velocity-to-grid scaling (production, 3D texture) |
+| `src/shaders/advection_dual_wind.wgsl` | Velocity-to-grid scaling (buffer fallback / validation) |

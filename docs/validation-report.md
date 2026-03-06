@@ -44,12 +44,24 @@ Metrics:
 
 ### 2.3 Reproduction
 
-```bash
-# Run the complete Fortran vs GPU validation
-scripts/compare-fortran.sh compose validate
+The Fortran Docker environment is in the sibling directory `../flexpart-fortran-docker/`.
 
-# Override particle count:
-PARTICLES=100000 scripts/compare-fortran.sh compose validate
+```bash
+# Fortran (from ../flexpart-fortran-docker/)
+docker compose run --rm flexpart-fortran bash -lc \
+  'cd /workspace/comparison/validate_run && /workspace/flexpart/src/FLEXPART'
+
+# GPU (from flexpart-gpu/)
+OUTPUT_PATH=target/validation/gpu_concentration.json \
+  PARTICLES=10000 SYNC_READBACK=1 \
+  cargo run --release --bin fortran-validation
+
+# Compare (from ../flexpart-fortran-docker/)
+docker compose run --rm flexpart-fortran python3 \
+  /workspace/flexpart-gpu/scripts/compare_concentrations.py \
+  --fortran-output /workspace/comparison/validate_run/output \
+  --gpu-output /workspace/flexpart-gpu/target/validation/gpu_concentration.json \
+  --verbose
 ```
 
 ## 3. Results

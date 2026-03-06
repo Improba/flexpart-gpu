@@ -31,6 +31,8 @@ pub enum WorkgroupKernel {
     WetDeposition,
     ConcentrationGridding,
     PblReflection,
+    PblDiagnostics,
+    ParticleStep,
 }
 
 impl WorkgroupKernel {
@@ -53,6 +55,8 @@ impl WorkgroupKernel {
             Self::WetDeposition => "wet_deposition",
             Self::ConcentrationGridding => "concentration_gridding",
             Self::PblReflection => "pbl_reflection",
+            Self::PblDiagnostics => "pbl_diagnostics",
+            Self::ParticleStep => "particle_step",
         }
     }
 
@@ -66,6 +70,8 @@ impl WorkgroupKernel {
             Self::WetDeposition => "WET_DEPOSITION",
             Self::ConcentrationGridding => "CONCENTRATION_GRIDDING",
             Self::PblReflection => "PBL_REFLECTION",
+            Self::PblDiagnostics => "PBL_DIAGNOSTICS",
+            Self::ParticleStep => "PARTICLE_STEP",
         }
     }
 }

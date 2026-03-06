@@ -27,10 +27,11 @@ Fortran code. Rationale:
 │  ┌─────────────────────────────────────────────────┐     │
 │  │           Time Loop Manager                     │     │
 │  │  for each timestep:                             │     │
-│  │    1. Upload new wind field (if needed)          │     │
-│  │    2. Release new particles (if needed)          │     │
-│  │    3. Dispatch GPU kernels                       │     │
-│  │    4. Download results (at output times only)    │     │
+│  │    1. Release new particles (if needed)          │     │
+│  │    2. Upload wind brackets (once per met change) │     │
+│  │    3. Upload surface fields for GPU PBL          │     │
+│  │    4. Dispatch GPU physics (4 passes per step)   │     │
+│  │    5. Download results (at output times only)    │     │
 │  └──────────────────────┬──────────────────────────┘     │
 │                         │                                │
 │  ┌──────────────────────▼──────────────────────────┐     │
@@ -43,17 +44,29 @@ Fortran code. Rationale:
 ┌──────────────────────────▼───────────────────────────────┐
 │                   GPU (WebGPU / WGSL)                    │
 │                                                          │
+│  PRODUCTION PATH (default) ─ 4 dispatches per step:      │
+│  ┌─────────────┐ ┌────────────────────┐ ┌────────────┐ │
+│  │ Advection   │→│ Fused Hanna+       │→│ Dry dep    │ │
+│  │ (3D texture)│ │ Langevin           │ │ + Wet dep  │ │
+│  └─────────────┘ └────────────────────┘ └────────────┘ │
+│                                                          │
+│  VALIDATION PATH (FLEXPART_GPU_VALIDATION=1) ─ 5 disp.: │
 │  ┌─────────────┐ ┌─────────────┐ ┌────────────────────┐ │
 │  │ Advection   │→│ Hanna PBL   │→│ Langevin           │ │
-│  │ (Petterssen)│ │ Turbulence  │ │ (+ PBL reflection) │ │
+│  │ (3D texture)│ │ Turbulence  │ │ (+ PBL reflection) │ │
 │  └─────────────┘ └─────────────┘ └────────────────────┘ │
-│  ┌─────────────┐ ┌─────────────┐ ┌────────────────────┐ │
-│  │ Dry         │ │ Wet         │ │ Concentration      │ │
-│  │ Deposition  │ │ Deposition  │ │ Gridding           │ │
-│  └─────────────┘ └─────────────┘ └────────────────────┘ │
-│  ┌─────────────┐                                        │
-│  │ Philox RNG  │  Buffers: [particles] [wind] [pbl]     │
-│  └─────────────┘           [output grid]                 │
+│  ┌─────────────┐ ┌─────────────┐                        │
+│  │ Dry         │ │ Wet         │                        │
+│  │ Deposition  │ │ Deposition  │                        │
+│  └─────────────┘ └─────────────┘                        │
+│                                                          │
+│  SHARED:                                                 │
+│  ┌─────────────┐ ┌───────────┐ ┌────────────────────┐   │
+│  │ PBL Diag.   │ │ Philox    │ │ Concentration      │   │
+│  │ (GPU)       │ │ RNG       │ │ Gridding           │   │
+│  └─────────────┘ └───────────┘ └────────────────────┘   │
+│                                                          │
+│  Buffers: [particles] [wind_t0+t1] [pbl] [output grid]  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -87,25 +100,38 @@ flexpart-gpu/
 │   │   └── rng.rs                # Philox CPU reference
 │   │
 │   ├── shaders/                  # WGSL GPU compute kernels
-│   │   ├── advection.wgsl        # Mean-wind advection
+│   │   ├── langevin_fused.wgsl   # ★ FUSED Hanna+Langevin (production default)
+│   │   │                         #   Inline Hanna PBL + Langevin turbulence
+│   │   ├── particle_step.wgsl    # Mega-kernel (abandoned, kept for reference)
+│   │   ├── advection.wgsl        # Mean-wind advection (validation path)
+│   │   ├── advection_dual_wind.wgsl      # Dual-wind bracket advection
+│   │   ├── advection_texture_dual_wind.wgsl  # 3D texture-sampled variant
+│   │   ├── advection_texture.wgsl        # 3D texture advection (single wind)
 │   │   ├── hanna_params.wgsl     # Hanna σ and T_L computation
 │   │   ├── langevin.wgsl         # Langevin + sub-stepping + PBL reflection
 │   │   ├── dry_deposition.wgsl   # Dry deposition probability
 │   │   ├── wet_deposition.wgsl   # Wet deposition probability
+│   │   ├── pbl_diagnostics.wgsl  # GPU PBL parameter computation
+│   │   ├── compaction.wgsl       # Active particle compaction (prefix-sum)
 │   │   ├── concentration_gridding.wgsl  # Particle → grid accumulation
 │   │   ├── pbl_reflection.wgsl   # Standalone PBL reflection (legacy)
+│   │   ├── wind_trilinear_interp.wgsl  # GPU wind interpolation helper
 │   │   ├── convective_mixing.wgsl
 │   │   ├── cbl.wgsl
 │   │   └── philox_rng.wgsl       # Counter-based RNG
 │   │
 │   ├── gpu/                      # GPU dispatch layer (wgpu plumbing)
 │   │   ├── mod.rs                # Public GPU API
+│   │   ├── langevin_fused.rs     # ★ Fused Hanna+Langevin dispatch (production)
+│   │   ├── particle_step.rs      # Mega-kernel dispatch (abandoned, kept for ref)
 │   │   ├── buffers.rs            # Particle, wind, PBL buffer management
-│   │   ├── advection.rs          # Advection kernel dispatch
+│   │   ├── advection.rs          # Advection kernel dispatch (+ dual-wind)
 │   │   ├── hanna.rs              # Hanna kernel dispatch
 │   │   ├── langevin.rs           # Langevin kernel dispatch
 │   │   ├── deposition.rs         # Dry deposition dispatch
 │   │   ├── wet_deposition.rs     # Wet deposition dispatch
+│   │   ├── pbl.rs                # GPU PBL diagnostics dispatch
+│   │   ├── compaction.rs         # Active particle compaction dispatch
 │   │   ├── gridding.rs           # Concentration gridding dispatch
 │   │   ├── pbl_reflection.rs     # PBL reflection dispatch
 │   │   ├── convection.rs         # Convective mixing dispatch
@@ -118,6 +144,7 @@ flexpart-gpu/
 │   ├── io/                       # Meteorological I/O
 │   │   ├── mod.rs
 │   │   ├── grib2.rs              # GRIB2 reader (eccodes)
+│   │   ├── grib2_async.rs        # Async GRIB prefetch (background thread)
 │   │   ├── netcdf.rs             # NetCDF reader
 │   │   ├── netcdf_output.rs      # NetCDF output writer
 │   │   ├── vertical_transform.rs # Hybrid σ-pressure → height
@@ -160,26 +187,40 @@ flexpart-gpu/
 │   └── etex/                     # ETEX helper scripts (ERA5, obs parsing)
 │
 ├── docker/
-│   ├── Dockerfile.gpu            # GPU build image (Ubuntu + Vulkan + Rust)
-│   └── Dockerfile.fortran        # Fortran FLEXPART build image
+│   └── Dockerfile.gpu            # GPU build image (Ubuntu + Vulkan + Rust)
 │
 ├── docker-compose.yml            # Default compose (any Vulkan GPU)
 └── docker-compose.nvidia.yml     # NVIDIA overlay
+
+# Fortran Docker is in a separate sibling directory:
+# ../flexpart-fortran-docker/
+#   ├── Dockerfile
+#   └── docker-compose.yml
 ```
+
+## Execution Paths
+
+The project supports two execution paths, selectable via environment variable:
+
+| Path | Activation | Purpose |
+|------|-----------|---------|
+| **Fused H+L** (default) | Default, no env var needed | Production. 4 dispatches: advection → fused Hanna+Langevin → dry dep → wet dep. |
+| **Separated** | `FLEXPART_GPU_VALIDATION=1` | Scientific validation. 5 dispatches: advection → Hanna → Langevin → dry dep → wet dep. |
 
 ## CPU / GPU Boundary
 
-The boundary is clear:
+- **CPU** handles: config parsing, meteorological I/O (GRIB reading, async
+  prefetch), particle release, output writing, and time-loop orchestration.
+- **GPU** handles: wind temporal interpolation (dual-wind brackets uploaded
+  once per met change, GPU interpolates with α), PBL diagnostics (`u*`, `w*`,
+  `L`, `h` computed on GPU from surface fields), all per-particle physics
+  (advection, turbulence, deposition), active particle compaction, and
+  concentration gridding.
 
-- **CPU** handles: config parsing, meteorological I/O, temporal interpolation,
-  PBL parameter derivation, particle release, output writing, and
-  orchestration of the time loop.
-- **GPU** handles: all per-particle physics (advection, turbulence, deposition,
-  gridding). These are embarrassingly parallel — each particle is independent
-  within a timestep.
-
-Steps 4–8 of the time loop are encoded into a **single GPU command encoder**
-and submitted as one batch, minimising CPU↔GPU round-trips. See
+In production mode, four dispatches per timestep are encoded into a single
+`wgpu` command encoder: advection, fused Hanna+Langevin, dry deposition, and
+wet deposition. The fused kernel eliminates the intermediate HannaParams buffer.
+In validation mode, five separate dispatches are encoded into the same encoder. See
 [science/simulation-flow.md](science/simulation-flow.md) for the full
 execution sequence.
 
@@ -201,12 +242,12 @@ over Vulkan, Metal, DX12, and OpenGL. Compute shaders are written in WGSL.
 All development and execution can happen inside Docker containers for
 reproducible builds and portable GPU access.
 
-Two images:
+Two images (in separate projects):
 
-| Image | Dockerfile | Purpose |
-|-------|-----------|---------|
-| `flexpart-gpu` | `docker/Dockerfile.gpu` | Ubuntu 22.04 + Vulkan + Rust + eccodes + netcdf |
-| `flexpart-fortran` | `docker/Dockerfile.fortran` | Fortran FLEXPART for oracle comparison |
+| Image | Location | Purpose |
+|-------|----------|---------|
+| `flexpart-gpu` | `docker/Dockerfile.gpu` (this project) | Ubuntu 22.04 + Vulkan + Rust + eccodes + netcdf |
+| `flexpart-fortran` | `../flexpart-fortran-docker/Dockerfile` (sibling directory) | Fortran FLEXPART for oracle comparison |
 
 Named volumes (`cargo-home`, `cargo-target`) persist the Rust build cache
 between container restarts. See [development.md](development.md) for usage.

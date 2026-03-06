@@ -140,18 +140,31 @@ FLEXPART_BENCH_MAX_PARTICLES=1000000 \
 
 ## Fortran Comparison
 
-Run the complete GPU vs Fortran validation:
+The Fortran Docker environment lives in a **sibling directory**
+(`../flexpart-fortran-docker/`), separate from this project.
 
 ```bash
-# Docker-based (builds and runs both)
-scripts/compare-fortran.sh compose validate
+# 1) Run Fortran (from ../flexpart-fortran-docker/)
+cd ../flexpart-fortran-docker
+docker compose run --rm flexpart-fortran bash -lc \
+  'cd /workspace/comparison/validate_run && /workspace/flexpart/src/FLEXPART'
 
-# Custom particle count
-PARTICLES=100000 scripts/compare-fortran.sh compose validate
+# 2) Run GPU (from flexpart-gpu/)
+cd ../flexpart-gpu
+OUTPUT_PATH=target/validation/gpu_concentration.json \
+  PARTICLES=1000000 SYNC_READBACK=1 \
+  cargo run --release --bin fortran-validation
+
+# 3) Compare (from ../flexpart-fortran-docker/)
+cd ../flexpart-fortran-docker
+docker compose run --rm flexpart-fortran python3 \
+  /workspace/flexpart-gpu/scripts/compare_concentrations.py \
+  --fortran-output /workspace/comparison/validate_run/output \
+  --gpu-output /workspace/flexpart-gpu/target/validation/gpu_concentration.json \
+  --verbose
 ```
 
-This builds Fortran FLEXPART in Docker, runs both codes on the same synthetic
-scenario, and compares particle positions.
+See [benchmarks.md](benchmarks.md) for detailed methodology and reports.
 
 ## ETEX Real-Data Pipeline
 

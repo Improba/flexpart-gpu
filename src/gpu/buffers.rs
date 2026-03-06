@@ -371,9 +371,17 @@ impl TryFrom<&PblState> for PblHostData {
 }
 
 /// GPU storage buffer for particle data.
+///
+/// Supports an adjustable dispatch count for compaction (O-07): after
+/// active-particle compaction packs active particles into contiguous
+/// leading slots, [`set_dispatch_count`](Self::set_dispatch_count)
+/// narrows subsequent dispatches to only those slots. Buffer I/O
+/// (upload/download) always operates on the full
+/// [`capacity`](Self::capacity).
 pub struct ParticleBuffers {
     pub particle_buffer: wgpu::Buffer,
-    particle_count: usize,
+    buffer_capacity: usize,
+    dispatch_count: usize,
 }
 
 impl ParticleBuffers {
@@ -390,13 +398,41 @@ impl ParticleBuffers {
             create_storage_buffer_from_pod(&ctx.device, "particles_storage", particles);
         Self {
             particle_buffer,
-            particle_count: particles.len(),
+            buffer_capacity: particles.len(),
+            dispatch_count: particles.len(),
         }
     }
 
+    /// Number of particles to dispatch (may be reduced by compaction).
     #[must_use]
     pub fn particle_count(&self) -> usize {
-        self.particle_count
+        self.dispatch_count
+    }
+
+    /// Total allocated particle slots in the GPU buffer.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.buffer_capacity
+    }
+
+    /// Narrow the dispatch count after compaction packs active particles
+    /// into the first `count` contiguous slots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `count > capacity()`.
+    pub fn set_dispatch_count(&mut self, count: usize) {
+        assert!(
+            count <= self.buffer_capacity,
+            "dispatch count {count} exceeds buffer capacity {}",
+            self.buffer_capacity,
+        );
+        self.dispatch_count = count;
+    }
+
+    /// Reset dispatch count to the full buffer capacity.
+    pub fn reset_dispatch_count(&mut self) {
+        self.dispatch_count = self.buffer_capacity;
     }
 
     pub fn upload_particles(
@@ -408,7 +444,7 @@ impl ParticleBuffers {
             &ctx.queue,
             &self.particle_buffer,
             "particles",
-            self.particle_count,
+            self.buffer_capacity,
             particles,
         )
     }
@@ -435,13 +471,13 @@ impl ParticleBuffers {
             let particle = store.get(index).ok_or(GpuBufferError::IndexOutOfBounds {
                 field: "particles",
                 index,
-                len: self.particle_count,
+                len: self.buffer_capacity,
             })?;
-            if index >= self.particle_count {
+            if index >= self.buffer_capacity {
                 return Err(GpuBufferError::IndexOutOfBounds {
                     field: "particles",
                     index,
-                    len: self.particle_count,
+                    len: self.buffer_capacity,
                 });
             }
             let byte_offset = checked_byte_len::<Particle>(index, "particles_slot_offset")?
@@ -455,6 +491,7 @@ impl ParticleBuffers {
         Ok(())
     }
 
+    /// Download all particle slots (full buffer capacity).
     pub async fn download_particles(
         &self,
         ctx: &GpuContext,
@@ -462,7 +499,7 @@ impl ParticleBuffers {
         download_buffer_typed::<Particle>(
             ctx,
             &self.particle_buffer,
-            self.particle_count,
+            self.buffer_capacity,
             "particles",
         )
         .await
@@ -753,6 +790,165 @@ fn pack_sampled_wind_texture_rgba(host: &WindHostData) -> Vec<f32> {
         packed.push(0.0);
     }
     packed
+}
+
+/// GPU storage buffers holding two wind field snapshots for dual-time
+/// temporal interpolation on the GPU (Tier 1.2 optimization).
+///
+/// Instead of the CPU computing `(1-alpha)*t0 + alpha*t1` and uploading the
+/// result each step, the two bracket endpoints are uploaded once and the GPU
+/// blends them inline using `alpha`.
+pub struct DualWindBuffers {
+    pub shape: (usize, usize, usize),
+    pub u_ms_t0: wgpu::Buffer,
+    pub v_ms_t0: wgpu::Buffer,
+    pub w_ms_t0: wgpu::Buffer,
+    pub u_ms_t1: wgpu::Buffer,
+    pub v_ms_t1: wgpu::Buffer,
+    pub w_ms_t1: wgpu::Buffer,
+    pub sampled_wind_uvw_t0: Option<WindSampledTexture3d>,
+    pub sampled_wind_uvw_t1: Option<WindSampledTexture3d>,
+    cell_count: usize,
+}
+
+impl DualWindBuffers {
+    /// Create dual-time wind buffers from two wind field snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuBufferError::ShapeMismatch`] if `wind_t0` and `wind_t1`
+    /// have different grid dimensions.
+    pub fn from_fields(
+        ctx: &GpuContext,
+        wind_t0: &WindField3D,
+        wind_t1: &WindField3D,
+    ) -> Result<Self, GpuBufferError> {
+        let host_t0 = WindHostData::try_from(wind_t0)?;
+        let host_t1 = WindHostData::try_from(wind_t1)?;
+        if host_t0.shape != host_t1.shape {
+            return Err(GpuBufferError::ShapeMismatch {
+                field: "dual_wind_t1",
+                expected: format!("{:?}", host_t0.shape),
+                actual: format!("{:?}", host_t1.shape),
+            });
+        }
+        Ok(Self::from_host_data_pair(ctx, &host_t0, &host_t1))
+    }
+
+    /// Create dual-time wind buffers from two pre-flattened host snapshots.
+    #[must_use]
+    pub fn from_host_data_pair(
+        ctx: &GpuContext,
+        host_t0: &WindHostData,
+        host_t1: &WindHostData,
+    ) -> Self {
+        debug_assert_eq!(host_t0.shape, host_t1.shape);
+        let sampled_t0 = create_sampled_wind_texture_3d(ctx, host_t0);
+        let sampled_t1 = create_sampled_wind_texture_3d(ctx, host_t1);
+        Self {
+            shape: host_t0.shape,
+            u_ms_t0: create_storage_buffer_from_pod(&ctx.device, "dual_wind_u_t0", &host_t0.u_ms),
+            v_ms_t0: create_storage_buffer_from_pod(&ctx.device, "dual_wind_v_t0", &host_t0.v_ms),
+            w_ms_t0: create_storage_buffer_from_pod(&ctx.device, "dual_wind_w_t0", &host_t0.w_ms),
+            u_ms_t1: create_storage_buffer_from_pod(&ctx.device, "dual_wind_u_t1", &host_t1.u_ms),
+            v_ms_t1: create_storage_buffer_from_pod(&ctx.device, "dual_wind_v_t1", &host_t1.v_ms),
+            w_ms_t1: create_storage_buffer_from_pod(&ctx.device, "dual_wind_w_t1", &host_t1.w_ms),
+            sampled_wind_uvw_t0: sampled_t0,
+            sampled_wind_uvw_t1: sampled_t1,
+            cell_count: host_t0.cell_count(),
+        }
+    }
+
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.cell_count
+    }
+
+    /// Upload replacement wind data for the t0 bracket endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuBufferError`] on shape mismatch or length mismatch.
+    pub fn upload_t0(
+        &self,
+        ctx: &GpuContext,
+        wind: &WindField3D,
+    ) -> Result<(), GpuBufferError> {
+        let host = WindHostData::try_from(wind)?;
+        self.upload_t0_host(ctx, &host)
+    }
+
+    /// Upload replacement wind data for the t1 bracket endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuBufferError`] on shape mismatch or length mismatch.
+    pub fn upload_t1(
+        &self,
+        ctx: &GpuContext,
+        wind: &WindField3D,
+    ) -> Result<(), GpuBufferError> {
+        let host = WindHostData::try_from(wind)?;
+        self.upload_t1_host(ctx, &host)
+    }
+
+    /// Upload pre-flattened host data for the t0 endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuBufferError`] on shape mismatch or length mismatch.
+    pub fn upload_t0_host(
+        &self,
+        ctx: &GpuContext,
+        host: &WindHostData,
+    ) -> Result<(), GpuBufferError> {
+        if host.shape != self.shape {
+            return Err(GpuBufferError::ShapeMismatch {
+                field: "dual_wind_t0",
+                expected: format!("{:?}", self.shape),
+                actual: format!("{:?}", host.shape),
+            });
+        }
+        write_exact_pod_slice(&ctx.queue, &self.u_ms_t0, "dual_wind_u_t0", self.cell_count, &host.u_ms)?;
+        write_exact_pod_slice(&ctx.queue, &self.v_ms_t0, "dual_wind_v_t0", self.cell_count, &host.v_ms)?;
+        write_exact_pod_slice(&ctx.queue, &self.w_ms_t0, "dual_wind_w_t0", self.cell_count, &host.w_ms)?;
+        if let Some(texture) = &self.sampled_wind_uvw_t0 {
+            upload_sampled_wind_texture_3d(ctx, texture, host);
+        }
+        Ok(())
+    }
+
+    /// Upload pre-flattened host data for the t1 endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuBufferError`] on shape mismatch or length mismatch.
+    pub fn upload_t1_host(
+        &self,
+        ctx: &GpuContext,
+        host: &WindHostData,
+    ) -> Result<(), GpuBufferError> {
+        if host.shape != self.shape {
+            return Err(GpuBufferError::ShapeMismatch {
+                field: "dual_wind_t1",
+                expected: format!("{:?}", self.shape),
+                actual: format!("{:?}", host.shape),
+            });
+        }
+        write_exact_pod_slice(&ctx.queue, &self.u_ms_t1, "dual_wind_u_t1", self.cell_count, &host.u_ms)?;
+        write_exact_pod_slice(&ctx.queue, &self.v_ms_t1, "dual_wind_v_t1", self.cell_count, &host.v_ms)?;
+        write_exact_pod_slice(&ctx.queue, &self.w_ms_t1, "dual_wind_w_t1", self.cell_count, &host.w_ms)?;
+        if let Some(texture) = &self.sampled_wind_uvw_t1 {
+            upload_sampled_wind_texture_3d(ctx, texture, host);
+        }
+        Ok(())
+    }
+
+    /// Whether both t0 and t1 have sampled 3-D wind textures available.
+    #[must_use]
+    pub fn has_sampled_textures(&self) -> bool {
+        self.sampled_wind_uvw_t0.is_some() && self.sampled_wind_uvw_t1.is_some()
+    }
 }
 
 /// GPU storage buffers for all gridded PBL fields.

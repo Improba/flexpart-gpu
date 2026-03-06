@@ -149,10 +149,14 @@ Above the mixing height, a simplified scheme (`hanna_short`) is used:
 
 | File | Role |
 |------|------|
-| `src/shaders/langevin.wgsl` | GPU Langevin kernel |
-| `src/physics/langevin.rs` | CPU Langevin step |
-| `src/shaders/hanna_params.wgsl` | GPU Hanna kernel |
-| `src/physics/hanna.rs` | CPU Hanna parameterisation |
+| `src/shaders/langevin_fused.wgsl` | Production — fused Hanna+Langevin kernel |
+| `src/shaders/hanna_params.wgsl` | Validation — standalone Hanna kernel |
+| `src/shaders/langevin.wgsl` | Validation — standalone Langevin kernel |
+| `src/physics/hanna.rs` | CPU Hanna parameterisation (reference) |
+| `src/physics/langevin.rs` | CPU Langevin step (reference) |
+| `src/gpu/langevin_fused.rs` | Production — fused dispatch |
+| `src/gpu/hanna.rs` | Validation — Hanna dispatch |
+| `src/gpu/langevin.rs` | Validation — Langevin dispatch |
 
 ## References
 

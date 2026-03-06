@@ -11,6 +11,7 @@
 //! - NetCDF output writer for concentration/deposition grids (I-03).
 
 pub mod grib2;
+pub mod grib2_async;
 pub mod netcdf;
 #[cfg(feature = "netcdf")]
 pub mod netcdf_output;
@@ -22,6 +23,7 @@ pub use grib2::{
     build_era5_mvp_from_records, load_era5_mvp_from_grib2, Era5GribGridMetadata, Era5GribRecord,
     Era5MvpSnapshot, Era5MvpSnapshotMetadata, Grib2ReaderError,
 };
+pub use grib2_async::{read_era5_snapshot_async, GribPrefetchHandle};
 pub use netcdf::{
     load_mvp_from_netcdf, load_mvp_from_netcdf_with_options, NetcdfMvpReadOptions,
     NetcdfMvpSnapshot, NetcdfMvpSnapshotMetadata, NetcdfMvpVariableNames, NetcdfReaderError,

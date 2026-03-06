@@ -23,29 +23,38 @@
 //!   backward API docs below.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::config::ReleaseConfig;
 use crate::coords::GridDomain;
 use crate::gpu::{
-    accumulate_concentration_grid_gpu, advect_particles_gpu, apply_dry_deposition_step_gpu,
-    apply_wet_deposition_step_gpu, compute_hanna_params_gpu, encode_advection_gpu_with_kernel,
-    encode_dry_deposition_probability_gpu_with_kernel, encode_hanna_params_gpu_with_kernel,
+    accumulate_concentration_grid_gpu, encode_advection_dual_wind_gpu_with_kernel,
+    encode_compaction_with_reorder, encode_dry_deposition_probability_gpu_with_kernel,
+    encode_hanna_params_gpu_with_kernel, encode_langevin_fused_gpu,
+    encode_pbl_diagnostics_gpu_with_kernel,
     encode_update_particles_turbulence_langevin_gpu_with_hanna_buffer_and_kernel,
-    encode_wet_deposition_probability_gpu_with_kernel, update_particles_turbulence_langevin_gpu,
-    AdvectionDispatchKernel, ConcentrationGridOutput, ConcentrationGridShape,
+    encode_wet_deposition_probability_gpu_with_kernel,
+    AdvectionDispatchKernel, AdvectionDualWindDispatchKernel, CompactionBuffers,
+    CompactionPipelines, ConcentrationGridOutput, ConcentrationGridShape,
     ConcentrationGriddingParams, DryDepositionDispatchKernel, DryDepositionIoBuffers,
-    DryDepositionStepParams, GpuAdvectionError, GpuBufferError, GpuConcentrationGriddingError,
-    GpuContext, GpuDryDepositionError, GpuError, GpuHannaError, GpuLangevinError,
-    GpuPblReflectionError, GpuWetDepositionError, HannaDispatchKernel, HannaParamsOutputBuffer,
-    LangevinDispatchKernel, ParticleBuffers, PblBuffers,
-    WetDepositionDispatchKernel, WetDepositionIoBuffers, WetDepositionStepParams, WindBuffers,
-    WindSamplingOptions, WindSamplingPath,
+    DryDepositionStepParams, DualWindBuffers, GpuAdvectionError, GpuBufferError,
+    GpuCompactionError, GpuConcentrationGriddingError, GpuContext, GpuDryDepositionError,
+    GpuError, GpuHannaError, GpuLangevinError, GpuLangevinFusedError,
+    GpuPblDiagnosticsError, GpuPblReflectionError, GpuWetDepositionError,
+    HannaDispatchKernel, HannaParamsOutputBuffer,
+    LangevinDispatchKernel, LangevinFusedDispatchKernel, ParticleBuffers,
+    PblBuffers, PblDiagnosticsDispatchKernel,
+    SurfaceFieldBuffer, WetDepositionDispatchKernel, WetDepositionIoBuffers,
+    WetDepositionStepParams, WindBuffers, WindSamplingPath,
 };
 use crate::io::{
-    compute_pbl_parameters_from_met, interpolate_surface_fields_linear,
-    interpolate_wind_field_linear, PblComputationOptions, PblMetInputGrids, PblParameterError,
+    compute_pbl_parameters_from_met, interpolate_surface_fields_linear, Era5GribGridMetadata,
+    Era5MvpSnapshot, Grib2ReaderError,
+    GribPrefetchHandle, PblComputationOptions, PblMetInputGrids, PblParameterError,
     TemporalInterpolationError, TimeBoundsBehavior,
 };
 use crate::particles::{ParticleSortError, ParticleSpatialSortOptions, ParticleStore};
@@ -310,6 +319,13 @@ impl ParticleForcingField {
             }
         }
     }
+
+    /// Returns `true` when the forcing is uniformly zero, meaning the
+    /// corresponding deposition process has no effect and can be skipped.
+    #[must_use]
+    fn is_zero(&self) -> bool {
+        matches!(self, Self::Uniform(v) if *v == 0.0)
+    }
 }
 
 /// Timestep forcing fields consumed by deposition and Langevin updates.
@@ -359,6 +375,130 @@ pub struct ForwardStepReport {
     pub wet_deposition_probability: Vec<f32>,
     /// Philox counter after the Langevin update.
     pub next_philox_counter: PhiloxCounter,
+    /// Per-section timing breakdown (present only when `FLEXPART_GPU_PROFILE=1`).
+    pub timing: Option<StepTimingReport>,
+}
+
+/// Per-section wall-clock timing for one forward timestep.
+///
+/// Populated only when `FLEXPART_GPU_PROFILE=1` is set. Each field records
+/// the wall-clock duration of one pipeline stage in milliseconds. Used by
+/// Phase 0 profiling to measure the actual CPU/GPU split before optimizing.
+#[derive(Debug, Clone)]
+pub struct StepTimingReport {
+    /// `interpolate_wind_field_linear` (CPU).
+    pub wind_interp_ms: f64,
+    /// `interpolate_surface_fields_linear` (CPU).
+    pub surf_interp_ms: f64,
+    /// `compute_pbl_parameters_from_met` (CPU).
+    pub pbl_ms: f64,
+    /// `ensure_wind_buffers` — upload wind field to GPU.
+    pub wind_upload_ms: f64,
+    /// `ensure_pbl_buffers` — upload PBL state to GPU.
+    pub pbl_upload_ms: f64,
+    /// `materialize()` calls for dry/wet deposition forcing vectors (CPU alloc+fill).
+    pub forcing_ms: f64,
+    /// `ensure_dry_deposition_io_buffers` + `ensure_wet_deposition_io_buffers`.
+    pub dep_upload_ms: f64,
+    /// Blocking wait for the *previous* step's GPU submission to complete
+    /// (O-03 pipeline overlap). Zero on the first step or when no work is
+    /// pending.
+    pub wait_prev_gpu_ms: f64,
+    /// CPU-side command encoding: `create_command_encoder` through `queue.submit()`.
+    pub gpu_encode_ms: f64,
+    /// GPU execution: `queue.submit()` to `device.poll(Wait)` completion.
+    pub gpu_exec_ms: f64,
+    /// Compaction encode + submit + readback (O-07). Zero when compaction
+    /// is disabled or all particles are active.
+    pub compaction_ms: f64,
+    /// Wall-clock for the entire `run_timestep` call.
+    pub total_ms: f64,
+}
+
+impl StepTimingReport {
+    fn print_summary(&self, step_index: usize) {
+        eprintln!(
+            "[profile] step={step_index} \
+             wind_interp={:.1}ms surf_interp={:.1}ms pbl={:.1}ms \
+             wind_upload={:.1}ms pbl_upload={:.1}ms forcing={:.1}ms \
+             dep_upload={:.1}ms wait_prev={:.1}ms \
+             gpu_encode={:.1}ms gpu_exec={:.1}ms \
+             compaction={:.1}ms \
+             total={:.1}ms",
+            self.wind_interp_ms,
+            self.surf_interp_ms,
+            self.pbl_ms,
+            self.wind_upload_ms,
+            self.pbl_upload_ms,
+            self.forcing_ms,
+            self.dep_upload_ms,
+            self.wait_prev_gpu_ms,
+            self.gpu_encode_ms,
+            self.gpu_exec_ms,
+            self.compaction_ms,
+            self.total_ms,
+        );
+    }
+}
+
+fn is_profiling_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FLEXPART_GPU_PROFILE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Returns `true` when PBL diagnostics should be computed on GPU (default).
+///
+/// Set `FLEXPART_GPU_PBL_CPU=1` to force the CPU fallback path.
+fn is_gpu_pbl_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("FLEXPART_GPU_PBL_CPU")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Returns `true` when the full multi-dispatch validation path is requested.
+///
+/// Set `FLEXPART_GPU_VALIDATION=1` to use separated Hanna → Langevin
+/// dispatches (5 dispatches per step), suitable for debugging and
+/// scientific validation. The default production path uses the fused
+/// Hanna+Langevin kernel (4 dispatches: advection + fused H+L + dry dep + wet dep).
+fn is_validation_mode() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FLEXPART_GPU_VALIDATION")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Returns `true` when active-particle compaction is enabled (O-07).
+///
+/// Set `FLEXPART_GPU_COMPACTION=1` to run a prefix-sum compaction + gather
+/// after each physics step, packing active particles into contiguous leading
+/// buffer slots. Subsequent dispatches then use `active_count` instead of
+/// `particle_capacity` for workgroup sizing, avoiding wasted GPU threads
+/// when deposition or domain exit deactivates particles.
+///
+/// Default: OFF (the initial benchmark has all particles active, so
+/// compaction would add overhead with zero benefit).
+fn is_compaction_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FLEXPART_GPU_COMPACTION")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+
+fn dur_ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
 }
 
 /// Result of one orchestrated backward timestep.
@@ -447,6 +587,8 @@ pub enum TimeLoopError {
     GpuHanna(#[from] GpuHannaError),
     #[error("GPU Langevin dispatch failed: {0}")]
     GpuLangevin(#[from] GpuLangevinError),
+    #[error("GPU PBL diagnostics dispatch failed: {0}")]
+    GpuPblDiagnostics(#[from] GpuPblDiagnosticsError),
     #[error("GPU PBL reflection dispatch failed: {0}")]
     GpuPblReflection(#[from] GpuPblReflectionError),
     #[error("GPU dry deposition dispatch failed: {0}")]
@@ -455,9 +597,17 @@ pub enum TimeLoopError {
     GpuWetDeposition(#[from] GpuWetDepositionError),
     #[error("GPU concentration gridding failed: {0}")]
     GpuConcentrationGridding(#[from] GpuConcentrationGriddingError),
+    #[error("GPU compaction failed: {0}")]
+    GpuCompaction(#[from] GpuCompactionError),
+    #[error("GPU fused Hanna+Langevin dispatch failed: {0}")]
+    GpuLangevinFused(#[from] GpuLangevinFusedError),
 }
 
 /// Forward-mode integration driver orchestrating per-timestep GPU dispatch.
+///
+/// All GPU buffers and dispatch kernels are pre-allocated at construction time
+/// (O-06) based on the known `particle_capacity` and grid dimensions. This
+/// eliminates per-step `ensure_*` lazy-init checks.
 pub struct ForwardTimeLoopDriver {
     config: ForwardTimeLoopConfig,
     current_time_seconds: i64,
@@ -468,20 +618,76 @@ pub struct ForwardTimeLoopDriver {
     particle_store: ParticleStore,
     gpu_context: GpuContext,
     particle_buffers: ParticleBuffers,
+    /// Single-wind buffers (legacy path, kept for backward compatibility).
     wind_buffers: Option<WindBuffers>,
     advection_dispatch_kernel: Option<AdvectionDispatchKernel>,
-    pbl_buffers: Option<PblBuffers>,
+    /// Dual-time wind buffers: t0 and t1 uploaded once per met bracket,
+    /// GPU interpolates inline using `alpha` (O-02 / Tier 1.2).
+    /// Remains `Option` because the 3-D wind grid shape is only known at
+    /// the first met bracket upload.
+    dual_wind_buffers: Option<DualWindBuffers>,
+    /// Pre-allocated dual-wind advection kernel; sampling path resolved from
+    /// GPU capabilities at construction time.
+    dual_wind_dispatch_kernel: AdvectionDualWindDispatchKernel,
+    /// Met bracket tracking: lower bound [s since epoch].
+    current_met_t0_seconds: Option<i64>,
+    /// Met bracket tracking: upper bound [s since epoch].
+    current_met_t1_seconds: Option<i64>,
+    /// PBL diagnostics compute kernel (O-04 GPU PBL path).
+    pbl_dispatch_kernel: PblDiagnosticsDispatchKernel,
+    /// GPU buffer for packed surface meteorological fields (O-04 GPU PBL path).
+    surface_field_buffer: SurfaceFieldBuffer,
+    /// Double-buffered PBL state (ping-pong A/B, O-03 pipeline overlap).
+    /// While the GPU reads from one slot, the CPU can upload the next
+    /// step's PBL to the other slot without a data hazard.
+    pbl_buffers: [PblBuffers; 2],
+    /// Index into `pbl_buffers` for the current CPU write target (alternates 0 ↔ 1).
+    pbl_write_index: usize,
+    /// Whether a GPU submission is in-flight and has not yet been waited on.
+    /// Set `true` after `queue.submit()`; cleared by `device.poll(Wait)` or
+    /// by an async readback that internally polls.
+    gpu_submission_pending: bool,
+    /// `true` when running the full multi-dispatch validation path
+    /// (`FLEXPART_GPU_VALIDATION=1`). Uses separated Hanna → Langevin
+    /// dispatches so intermediate buffers can be inspected.
+    /// Production path uses the fused Hanna+Langevin kernel instead.
+    validation_mode: bool,
+    /// Fused Hanna+Langevin dispatch kernel (production path).
+    /// `None` in validation mode.
+    langevin_fused_dispatch_kernel: Option<LangevinFusedDispatchKernel>,
+    /// Intermediate Hanna output buffer (validation path only).
     hanna_params_output: Option<HannaParamsOutputBuffer>,
+    /// Separated Hanna kernel (validation path only).
     hanna_dispatch_kernel: Option<HannaDispatchKernel>,
+    /// Separated Langevin kernel (validation path only).
     langevin_dispatch_kernel: Option<LangevinDispatchKernel>,
-    dry_deposition_io: Option<DryDepositionIoBuffers>,
-    dry_deposition_dispatch_kernel: Option<DryDepositionDispatchKernel>,
-    wet_deposition_io: Option<WetDepositionIoBuffers>,
-    wet_deposition_dispatch_kernel: Option<WetDepositionDispatchKernel>,
+    /// Dry deposition IO buffers (both production and validation paths).
+    dry_deposition_io: DryDepositionIoBuffers,
+    /// Dry deposition kernel (both production and validation paths).
+    dry_deposition_dispatch_kernel: DryDepositionDispatchKernel,
+    /// Wet deposition IO buffers (both production and validation paths).
+    wet_deposition_io: WetDepositionIoBuffers,
+    /// Wet deposition kernel (both production and validation paths).
+    wet_deposition_dispatch_kernel: WetDepositionDispatchKernel,
+    /// Active GRIB prefetch handle, if a background read is in flight.
+    grib_prefetch: Option<GribPrefetchHandle>,
+    /// Whether active-particle compaction is enabled (O-07).
+    /// Controlled by `FLEXPART_GPU_COMPACTION=1`.
+    use_compaction: bool,
+    /// Pre-allocated compaction pipelines (prefix-sum + gather/reorder).
+    /// `None` when compaction is disabled.
+    compaction_pipelines: Option<CompactionPipelines>,
+    /// Pre-allocated compaction buffers (sized to `particle_capacity`).
+    /// `None` when compaction is disabled.
+    compaction_buffers: Option<CompactionBuffers>,
 }
 
 impl ForwardTimeLoopDriver {
     /// Create a new forward timeloop driver with empty particle store.
+    ///
+    /// All GPU buffers and dispatch kernels are pre-allocated here based on
+    /// `particle_capacity` and `release_grid` dimensions (O-06). This avoids
+    /// per-step lazy-init checks in the hot loop.
     pub async fn new(
         config: ForwardTimeLoopConfig,
         releases: &[ReleaseConfig],
@@ -490,10 +696,65 @@ impl ForwardTimeLoopDriver {
     ) -> Result<Self, TimeLoopError> {
         let (start_time_seconds, end_time_seconds) = validate_config(&config)?;
         let initial_philox_counter = config.initial_philox_counter;
+        let met_grid_shape = (release_grid.nx, release_grid.ny);
         let release_manager = ReleaseManager::new(releases, release_grid)?;
         let particle_store = ParticleStore::with_capacity(particle_capacity);
         let gpu_context = GpuContext::new().await?;
         let particle_buffers = ParticleBuffers::from_store(&gpu_context, &particle_store);
+
+        let validation_mode = is_validation_mode();
+
+        let dual_wind_sampling_path = if gpu_context.supports_wind_texture_sampling() {
+            WindSamplingPath::SampledTexture3d
+        } else {
+            WindSamplingPath::BufferStorage
+        };
+        let dual_wind_dispatch_kernel =
+            AdvectionDualWindDispatchKernel::new(&gpu_context, dual_wind_sampling_path);
+
+        let pbl_dispatch_kernel = PblDiagnosticsDispatchKernel::new(&gpu_context);
+        let surface_field_buffer = SurfaceFieldBuffer::with_shape(&gpu_context, met_grid_shape);
+        let pbl_placeholder_a =
+            crate::pbl::PblState::new(met_grid_shape.0, met_grid_shape.1);
+        let pbl_placeholder_b =
+            crate::pbl::PblState::new(met_grid_shape.0, met_grid_shape.1);
+        let pbl_buffers = [
+            PblBuffers::from_state(&gpu_context, &pbl_placeholder_a)?,
+            PblBuffers::from_state(&gpu_context, &pbl_placeholder_b)?,
+        ];
+
+        let langevin_fused_dispatch_kernel = if validation_mode {
+            None
+        } else {
+            Some(LangevinFusedDispatchKernel::new(&gpu_context))
+        };
+
+        let (hanna_params_output, hanna_dispatch_kernel, langevin_dispatch_kernel) =
+            if validation_mode {
+                (
+                    Some(HannaParamsOutputBuffer::new(&gpu_context, particle_capacity)?),
+                    Some(HannaDispatchKernel::new(&gpu_context)),
+                    Some(LangevinDispatchKernel::new(&gpu_context)),
+                )
+            } else {
+                (None, None, None)
+            };
+
+        let zeros = vec![0.0_f32; particle_capacity];
+        let dry_deposition_io = DryDepositionIoBuffers::from_velocity(&gpu_context, &zeros)?;
+        let dry_deposition_dispatch_kernel = DryDepositionDispatchKernel::new(&gpu_context);
+        let wet_deposition_io =
+            WetDepositionIoBuffers::from_inputs(&gpu_context, &zeros, &zeros)?;
+        let wet_deposition_dispatch_kernel = WetDepositionDispatchKernel::new(&gpu_context);
+
+        let use_compaction = is_compaction_enabled();
+        let (compaction_pipelines, compaction_buffers) = if use_compaction {
+            let pipelines = CompactionPipelines::new(&gpu_context);
+            let buffers = CompactionBuffers::new(&gpu_context, particle_capacity)?;
+            (Some(pipelines), Some(buffers))
+        } else {
+            (None, None)
+        };
 
         Ok(Self {
             config,
@@ -507,14 +768,28 @@ impl ForwardTimeLoopDriver {
             particle_buffers,
             wind_buffers: None,
             advection_dispatch_kernel: None,
-            pbl_buffers: None,
-            hanna_params_output: None,
-            hanna_dispatch_kernel: None,
-            langevin_dispatch_kernel: None,
-            dry_deposition_io: None,
-            dry_deposition_dispatch_kernel: None,
-            wet_deposition_io: None,
-            wet_deposition_dispatch_kernel: None,
+            dual_wind_buffers: None,
+            dual_wind_dispatch_kernel,
+            current_met_t0_seconds: None,
+            current_met_t1_seconds: None,
+            pbl_dispatch_kernel,
+            surface_field_buffer,
+            pbl_buffers,
+            pbl_write_index: 0,
+            gpu_submission_pending: false,
+            validation_mode,
+            langevin_fused_dispatch_kernel,
+            hanna_params_output,
+            hanna_dispatch_kernel,
+            langevin_dispatch_kernel,
+            dry_deposition_io,
+            dry_deposition_dispatch_kernel,
+            wet_deposition_io,
+            wet_deposition_dispatch_kernel,
+            grib_prefetch: None,
+            use_compaction,
+            compaction_pipelines,
+            compaction_buffers,
         })
     }
 
@@ -542,7 +817,40 @@ impl ForwardTimeLoopDriver {
         self.particle_store
     }
 
+    /// Start prefetching the next meteorological file in a background thread.
+    ///
+    /// Call this when the next met file path is known (e.g. based on simulation
+    /// time approaching a bracket boundary). The prefetch runs on a dedicated OS
+    /// thread in parallel with GPU computation. Any previously active prefetch
+    /// is replaced (the orphaned thread will run to completion but its result is
+    /// discarded).
+    pub fn prefetch_met(
+        &mut self,
+        path: impl AsRef<Path> + Send + 'static,
+        expected_grid: Option<Era5GribGridMetadata>,
+    ) {
+        self.grib_prefetch = Some(GribPrefetchHandle::start(path, expected_grid));
+    }
+
+    /// If a prefetch is active and complete, consume and return the result.
+    ///
+    /// Returns `None` if no prefetch is active or if the background thread has
+    /// not finished yet. On success the internal handle is consumed; calling
+    /// this again without a new [`prefetch_met`](Self::prefetch_met) returns
+    /// `None`.
+    pub fn try_consume_prefetch(&mut self) -> Option<Result<Era5MvpSnapshot, Grib2ReaderError>> {
+        if self.grib_prefetch.as_ref().is_some_and(|h| h.is_ready()) {
+            Some(self.grib_prefetch.take().expect("checked Some above").await_result())
+        } else {
+            None
+        }
+    }
+
     /// Accumulate current particle state into a concentration grid on GPU.
+    ///
+    /// If a GPU submission is still pending from the last timestep, call
+    /// [`finalize`](Self::finalize) first to ensure particle positions are
+    /// up to date.
     pub async fn accumulate_concentration_grid(
         &self,
         shape: ConcentrationGridShape,
@@ -553,7 +861,23 @@ impl ForwardTimeLoopDriver {
             .map_err(Into::into)
     }
 
-    /// Run one orchestrated timestep.
+    /// Run one orchestrated timestep with CPU/GPU overlap (O-03).
+    ///
+    /// The method is split into four phases:
+    ///
+    /// 1. **CPU prep** — surface interpolation, PBL computation, buffer
+    ///    staging. Runs concurrently with the *previous* step's in-flight
+    ///    GPU work.
+    /// 2. **Wait previous GPU** — block until the previous submission
+    ///    completes (no-op on the first step).
+    /// 3. **Encode + submit** — build the command encoder and call
+    ///    `queue.submit()`. Returns immediately; GPU starts asynchronously.
+    /// 4. **Optional wait + readback** — if per-step synchronization or
+    ///    deposition probability collection is enabled, block until *this*
+    ///    step's GPU work finishes and download results.
+    ///
+    /// PBL buffers use a ping-pong double buffer so that CPU uploads for
+    /// step N+1 never race with GPU reads from step N.
     pub async fn run_timestep(
         &mut self,
         met: &MetTimeBracket<'_>,
@@ -564,6 +888,11 @@ impl ForwardTimeLoopDriver {
         }
         self.apply_spatial_sort_if_enabled()?;
 
+        let profiling = is_profiling_enabled();
+        let total_start = profiling.then(Instant::now);
+
+        // ── Phase 1: CPU prep (overlaps with previous GPU submission) ──
+
         let timestamp = format_timestamp_seconds(self.current_time_seconds)?;
         let release_report = self.release_manager.inject_and_upload_for_time(
             &timestamp,
@@ -572,6 +901,15 @@ impl ForwardTimeLoopDriver {
             &self.gpu_context,
         )?;
 
+        // O-07: After release, widen the dispatch window to cover both the
+        // compacted active prefix from the previous step and newly released
+        // particles (which the release manager placed at the first free
+        // slots immediately after the active prefix).
+        if self.use_compaction {
+            self.particle_buffers
+                .set_dispatch_count(self.particle_store.active_count());
+        }
+
         let interpolation_alpha = interpolation_alpha(
             met.time_t0_seconds,
             met.time_t1_seconds,
@@ -579,14 +917,13 @@ impl ForwardTimeLoopDriver {
             self.config.time_bounds_behavior,
         )?;
 
-        let interpolated_wind = interpolate_wind_field_linear(
-            met.wind_t0,
-            met.wind_t1,
-            met.time_t0_seconds,
-            met.time_t1_seconds,
-            self.current_time_seconds,
-            self.config.time_bounds_behavior,
-        )?;
+        // O-02: upload wind_t0 and wind_t1 once per met bracket.
+        let t = profiling.then(Instant::now);
+        self.upload_dual_wind_if_bracket_changed(met)?;
+        let wind_upload_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
+        let wind_interp_dur = Duration::ZERO;
+
+        let t = profiling.then(Instant::now);
         let interpolated_surface = interpolate_surface_fields_linear(
             met.surface_t0,
             met.surface_t1,
@@ -595,51 +932,77 @@ impl ForwardTimeLoopDriver {
             self.current_time_seconds,
             self.config.time_bounds_behavior,
         )?;
+        let surf_interp_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
 
-        let computed_pbl = compute_pbl_parameters_from_met(
-            PblMetInputGrids {
-                surface: &interpolated_surface,
-                profile: None,
-            },
-            self.config.pbl_options,
-        )?;
+        let use_gpu_pbl = is_gpu_pbl_enabled();
+        let (pbl_dur, pbl_upload_dur) = if use_gpu_pbl {
+            let t = profiling.then(Instant::now);
+            self.surface_field_buffer
+                .upload(&self.gpu_context, &interpolated_surface)?;
+            let dur = t.map_or(Duration::ZERO, |t| t.elapsed());
+            (dur, Duration::ZERO)
+        } else {
+            let t = profiling.then(Instant::now);
+            let computed_pbl = compute_pbl_parameters_from_met(
+                PblMetInputGrids {
+                    surface: &interpolated_surface,
+                    profile: None,
+                },
+                self.config.pbl_options,
+            )?;
+            let pbl_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
 
-        self.ensure_wind_buffers(&interpolated_wind)?;
-        self.ensure_pbl_buffers(&computed_pbl.pbl_state)?;
-        let step_dt_seconds = timestep_seconds_f32(self.config.timestep_seconds)?;
-        let advection_options = WindSamplingOptions::default();
-        let advection_sampling_path = {
-            let wind_buffers = self
-                .wind_buffers
-                .as_ref()
-                .expect("wind buffers are initialized by ensure_wind_buffers");
-            crate::gpu::resolve_wind_sampling_path(
-                &self.gpu_context,
-                wind_buffers,
-                advection_options,
-            )
+            let t = profiling.then(Instant::now);
+            self.pbl_buffers[self.pbl_write_index]
+                .upload_state(&self.gpu_context, &computed_pbl.pbl_state)?;
+            let pbl_upload_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
+            (pbl_dur, pbl_upload_dur)
         };
-        self.ensure_advection_dispatch_kernel(advection_sampling_path);
 
-        self.ensure_hanna_params_output_buffer(self.particle_buffers.particle_count())?;
-        self.ensure_hanna_dispatch_kernel();
-        self.ensure_langevin_dispatch_kernel();
+        let step_dt_seconds = timestep_seconds_f32(self.config.timestep_seconds)?;
 
-        let slot_count = self.particle_buffers.particle_count();
-        let dry_velocity = forcing
-            .dry_deposition_velocity_m_s
-            .materialize(slot_count, "dry_deposition_velocity_m_s")?;
-        let wet_scavenging = forcing
-            .wet_scavenging_coefficient_s_inv
-            .materialize(slot_count, "wet_scavenging_coefficient_s_inv")?;
-        let wet_fraction = forcing
-            .wet_precipitating_fraction
-            .materialize(slot_count, "wet_precipitating_fraction")?;
+        let skip_dry_deposition = forcing.dry_deposition_velocity_m_s.is_zero();
+        let skip_wet_deposition = forcing.wet_scavenging_coefficient_s_inv.is_zero()
+            && forcing.wet_precipitating_fraction.is_zero();
 
-        self.ensure_dry_deposition_io_buffers(&dry_velocity)?;
-        self.ensure_wet_deposition_io_buffers(&wet_scavenging, &wet_fraction)?;
-        self.ensure_dry_deposition_dispatch_kernel();
-        self.ensure_wet_deposition_dispatch_kernel();
+        let t = profiling.then(Instant::now);
+        // Use buffer capacity (not dispatch count) for forcing materialization:
+        // deposition I/O buffers were pre-allocated for the full capacity.
+        let slot_count = self.particle_buffers.capacity();
+        if !skip_dry_deposition {
+            let dry_velocity = forcing
+                .dry_deposition_velocity_m_s
+                .materialize(slot_count, "dry_deposition_velocity_m_s")?;
+            self.dry_deposition_io
+                .upload_deposition_velocity(&self.gpu_context, &dry_velocity)?;
+        }
+        if !skip_wet_deposition {
+            let wet_scavenging = forcing
+                .wet_scavenging_coefficient_s_inv
+                .materialize(slot_count, "wet_scavenging_coefficient_s_inv")?;
+            let wet_fraction = forcing
+                .wet_precipitating_fraction
+                .materialize(slot_count, "wet_precipitating_fraction")?;
+            self.wet_deposition_io
+                .upload_scavenging_coefficient(&self.gpu_context, &wet_scavenging)?;
+            self.wet_deposition_io
+                .upload_precipitating_fraction(&self.gpu_context, &wet_fraction)?;
+        }
+        let forcing_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
+        let dep_upload_dur = Duration::ZERO;
+
+        // ── Phase 2: Wait for previous GPU submission ──────────────────
+
+        let wait_prev_dur = if self.gpu_submission_pending {
+            let t = profiling.then(Instant::now);
+            self.gpu_context.device.poll(wgpu::Maintain::Wait);
+            self.gpu_submission_pending = false;
+            t.map_or(Duration::ZERO, |t| t.elapsed())
+        } else {
+            Duration::ZERO
+        };
+
+        // ── Phase 3: Encode + submit (non-blocking) ───────────────────
 
         let dry_params = DryDepositionStepParams {
             dt_seconds: step_dt_seconds,
@@ -648,6 +1011,7 @@ impl ForwardTimeLoopDriver {
         let wet_params = WetDepositionStepParams {
             dt_seconds: step_dt_seconds,
         };
+        let t = profiling.then(Instant::now);
         let next_philox_counter = {
             let mut encoder =
                 self.gpu_context
@@ -655,133 +1019,223 @@ impl ForwardTimeLoopDriver {
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("forward_timeloop_step_encoder"),
                     });
-            let wind_buffers = self
-                .wind_buffers
+
+            // ── PBL diagnostics (both paths) ────────────────────────
+            if use_gpu_pbl {
+                encode_pbl_diagnostics_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.surface_field_buffer,
+                    &self.pbl_buffers[self.pbl_write_index],
+                    &self.config.pbl_options,
+                    &self.pbl_dispatch_kernel,
+                    &mut encoder,
+                )?;
+            }
+
+            // ── Advection (both paths) ───────────────────────────────
+            let dual_wind = self
+                .dual_wind_buffers
                 .as_ref()
-                .expect("wind buffers are initialized by ensure_wind_buffers");
-            let advection_kernel = self
-                .advection_dispatch_kernel
-                .as_ref()
-                .expect("advection dispatch kernel is initialized");
-            encode_advection_gpu_with_kernel(
+                .expect("dual wind buffers uploaded by upload_dual_wind_if_bracket_changed");
+            encode_advection_dual_wind_gpu_with_kernel(
                 &self.gpu_context,
                 &self.particle_buffers,
-                wind_buffers,
+                dual_wind,
+                interpolation_alpha,
                 step_dt_seconds,
                 self.config.velocity_to_grid_scale,
-                advection_options,
-                advection_kernel,
+                &self.dual_wind_dispatch_kernel,
                 &mut encoder,
             )?;
 
-            // PBL reflection is now integrated into the Langevin sub-stepping
-            // kernel (n_substeps >= 1) to properly reflect at z=0 and z=hmix
-            // between each vertical turbulence sub-step.
+            // ── Hanna + Langevin turbulence ──────────────────────────
+            let pbl_buffers = &self.pbl_buffers[self.pbl_write_index];
+            let langevin_step = LangevinStep {
+                dt_seconds: step_dt_seconds,
+                rho_grad_over_rho: forcing.rho_grad_over_rho,
+                n_substeps: 4,
+                min_height_m: 0.01,
+            };
 
-            let pbl_buffers = self
-                .pbl_buffers
-                .as_ref()
-                .expect("pbl buffers are initialized by ensure_pbl_buffers");
-            let hanna_output = self
-                .hanna_params_output
-                .as_ref()
-                .expect("hanna output buffer is initialized");
-            let hanna_kernel = self
-                .hanna_dispatch_kernel
-                .as_ref()
-                .expect("hanna dispatch kernel is initialized");
-            encode_hanna_params_gpu_with_kernel(
-                &self.gpu_context,
-                &self.particle_buffers,
-                pbl_buffers,
-                hanna_output,
-                hanna_kernel,
-                &mut encoder,
-            )?;
-
-            let langevin_kernel = self
-                .langevin_dispatch_kernel
-                .as_ref()
-                .expect("langevin dispatch kernel is initialized");
-            let next_philox_counter =
+            let next_philox_counter = if !self.validation_mode {
+                // ── Production: fused Hanna+Langevin (single dispatch) ──
+                encode_langevin_fused_gpu(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    pbl_buffers,
+                    langevin_step,
+                    self.config.philox_key,
+                    self.philox_counter,
+                    self.langevin_fused_dispatch_kernel
+                        .as_ref()
+                        .expect("fused kernel allocated in production mode"),
+                    &mut encoder,
+                )?
+            } else {
+                // ── Validation: separated Hanna → Langevin dispatches ──
+                let hanna_output = self
+                    .hanna_params_output
+                    .as_ref()
+                    .expect("hanna output allocated in validation mode");
+                encode_hanna_params_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    pbl_buffers,
+                    hanna_output,
+                    self.hanna_dispatch_kernel
+                        .as_ref()
+                        .expect("hanna kernel allocated in validation mode"),
+                    &mut encoder,
+                )?;
                 encode_update_particles_turbulence_langevin_gpu_with_hanna_buffer_and_kernel(
                     &self.gpu_context,
                     &self.particle_buffers,
                     &hanna_output.buffer,
                     hanna_output.particle_count(),
-                    LangevinStep {
-                        dt_seconds: step_dt_seconds,
-                        rho_grad_over_rho: forcing.rho_grad_over_rho,
-                        n_substeps: 4,
-                        min_height_m: 0.01,
-                    },
+                    langevin_step,
                     self.config.philox_key,
                     self.philox_counter,
-                    langevin_kernel,
+                    self.langevin_dispatch_kernel
+                        .as_ref()
+                        .expect("langevin kernel allocated in validation mode"),
+                    &mut encoder,
+                )?
+            };
+
+            // ── Deposition (both paths) ──────────────────────────────
+            if !skip_dry_deposition {
+                encode_dry_deposition_probability_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    &self.dry_deposition_io,
+                    dry_params,
+                    &self.dry_deposition_dispatch_kernel,
                     &mut encoder,
                 )?;
+            }
+            if !skip_wet_deposition {
+                encode_wet_deposition_probability_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    &self.wet_deposition_io,
+                    wet_params,
+                    &self.wet_deposition_dispatch_kernel,
+                    &mut encoder,
+                )?;
+            }
 
-            let dry_io = self
-                .dry_deposition_io
-                .as_ref()
-                .expect("dry deposition IO is initialized");
-            let dry_kernel = self
-                .dry_deposition_dispatch_kernel
-                .as_ref()
-                .expect("dry deposition dispatch kernel is initialized");
-            encode_dry_deposition_probability_gpu_with_kernel(
-                &self.gpu_context,
-                &self.particle_buffers,
-                dry_io,
-                dry_params,
-                dry_kernel,
-                &mut encoder,
-            )?;
-
-            let wet_io = self
-                .wet_deposition_io
-                .as_ref()
-                .expect("wet deposition IO is initialized");
-            let wet_kernel = self
-                .wet_deposition_dispatch_kernel
-                .as_ref()
-                .expect("wet deposition dispatch kernel is initialized");
-            encode_wet_deposition_probability_gpu_with_kernel(
-                &self.gpu_context,
-                &self.particle_buffers,
-                wet_io,
-                wet_params,
-                wet_kernel,
-                &mut encoder,
-            )?;
+            // O-07: Encode compaction + gather/reorder after all physics
+            // passes. Compaction reads particle flags set by deposition and
+            // reorders the buffer so active particles are contiguous.
+            if self.use_compaction {
+                encode_compaction_with_reorder(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    self.compaction_buffers.as_ref().expect(
+                        "compaction buffers allocated when compaction is enabled",
+                    ),
+                    self.compaction_pipelines.as_ref().expect(
+                        "compaction pipelines allocated when compaction is enabled",
+                    ),
+                    &mut encoder,
+                )?;
+            }
 
             self.gpu_context.queue.submit(Some(encoder.finish()));
             next_philox_counter
         };
+        let gpu_encode_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
+
+        self.gpu_submission_pending = true;
+        self.pbl_write_index = 1 - self.pbl_write_index;
+
+        // ── Phase 4: Optional wait + readback ──────────────────────────
+        // When profiling, we always poll to measure `gpu_exec`. When
+        // collecting deposition probabilities or syncing the particle
+        // store, the async download methods poll internally.
+
+        let gpu_exec_dur = if profiling {
+            let t = Instant::now();
+            self.gpu_context.device.poll(wgpu::Maintain::Wait);
+            self.gpu_submission_pending = false;
+            t.elapsed()
+        } else {
+            Duration::ZERO
+        };
+
         self.philox_counter = next_philox_counter;
 
-        let dry_probability = if self.config.collect_deposition_probabilities_each_step {
-            let dry_io = self
+        let dry_probability = if self.config.collect_deposition_probabilities_each_step
+            && !skip_dry_deposition
+        {
+            let result = self
                 .dry_deposition_io
-                .as_ref()
-                .expect("dry deposition IO is initialized");
-            dry_io.download_probabilities(&self.gpu_context).await?
+                .download_probabilities(&self.gpu_context)
+                .await?;
+            self.gpu_submission_pending = false;
+            result
         } else {
             Vec::new()
         };
-        let wet_probability = if self.config.collect_deposition_probabilities_each_step {
-            let wet_io = self
+        let wet_probability = if self.config.collect_deposition_probabilities_each_step
+            && !skip_wet_deposition
+        {
+            let result = self
                 .wet_deposition_io
-                .as_ref()
-                .expect("wet deposition IO is initialized");
-            wet_io.download_probabilities(&self.gpu_context).await?
+                .download_probabilities(&self.gpu_context)
+                .await?;
+            self.gpu_submission_pending = false;
+            result
         } else {
             Vec::new()
         };
 
+        let t_compact = profiling.then(Instant::now);
+        if self.use_compaction {
+            if self.gpu_submission_pending {
+                self.gpu_context.device.poll(wgpu::Maintain::Wait);
+                self.gpu_submission_pending = false;
+            }
+            let active_count = self
+                .compaction_buffers
+                .as_ref()
+                .expect("compaction buffers allocated when compaction is enabled")
+                .download_active_count(&self.gpu_context)
+                .await? as usize;
+            self.particle_buffers.set_dispatch_count(active_count);
+            self.particle_store.reset_after_compaction(active_count);
+        }
         if self.config.sync_particle_store_each_step {
+            if self.gpu_submission_pending {
+                self.gpu_context.device.poll(wgpu::Maintain::Wait);
+                self.gpu_submission_pending = false;
+            }
             self.sync_store_from_gpu().await?;
         }
+        let compaction_dur = t_compact.map_or(Duration::ZERO, |t| t.elapsed());
+
+        let timing = if profiling {
+            let total_dur = total_start.map_or(Duration::ZERO, |t| t.elapsed());
+            let report = StepTimingReport {
+                wind_interp_ms: dur_ms(wind_interp_dur),
+                surf_interp_ms: dur_ms(surf_interp_dur),
+                pbl_ms: dur_ms(pbl_dur),
+                wind_upload_ms: dur_ms(wind_upload_dur),
+                pbl_upload_ms: dur_ms(pbl_upload_dur),
+                forcing_ms: dur_ms(forcing_dur),
+                dep_upload_ms: dur_ms(dep_upload_dur),
+                wait_prev_gpu_ms: dur_ms(wait_prev_dur),
+                gpu_encode_ms: dur_ms(gpu_encode_dur),
+                gpu_exec_ms: dur_ms(gpu_exec_dur),
+                compaction_ms: dur_ms(compaction_dur),
+                total_ms: dur_ms(total_dur),
+            };
+            report.print_summary(self.step_index);
+            Some(report)
+        } else {
+            None
+        };
+
         let report = ForwardStepReport {
             step_index: self.step_index,
             timestamp,
@@ -795,6 +1249,7 @@ impl ForwardTimeLoopDriver {
             dry_deposition_probability: dry_probability,
             wet_deposition_probability: wet_probability,
             next_philox_counter: self.philox_counter,
+            timing,
         };
 
         self.step_index += 1;
@@ -806,6 +1261,9 @@ impl ForwardTimeLoopDriver {
     }
 
     /// Run until `end_timestamp` using fixed forcing and one met bracket.
+    ///
+    /// Calls [`finalize`](Self::finalize) after the last step to drain any
+    /// pending GPU submission.
     pub async fn run_to_end(
         &mut self,
         met: &MetTimeBracket<'_>,
@@ -815,9 +1273,25 @@ impl ForwardTimeLoopDriver {
         while self.has_remaining_steps() {
             reports.push(self.run_timestep(met, forcing).await?);
         }
+        self.finalize().await?;
         Ok(reports)
     }
 
+    /// Drain the last pending GPU submission (if any).
+    ///
+    /// Must be called after the final [`run_timestep`](Self::run_timestep)
+    /// when the caller drives the loop manually. [`run_to_end`](Self::run_to_end)
+    /// calls this automatically. Safe to call multiple times.
+    pub async fn finalize(&mut self) -> Result<(), TimeLoopError> {
+        if self.gpu_submission_pending {
+            self.gpu_context.device.poll(wgpu::Maintain::Wait);
+            self.gpu_submission_pending = false;
+        }
+        Ok(())
+    }
+
+    /// Legacy single-wind upload path, kept for backward compatibility testing.
+    #[allow(dead_code)]
     fn ensure_wind_buffers(&mut self, wind: &WindField3D) -> Result<(), TimeLoopError> {
         if let Some(buffers) = &self.wind_buffers {
             buffers.upload_field(&self.gpu_context, wind)?;
@@ -827,6 +1301,8 @@ impl ForwardTimeLoopDriver {
         Ok(())
     }
 
+    /// Legacy single-wind kernel setup, kept for backward compatibility testing.
+    #[allow(dead_code)]
     fn ensure_advection_dispatch_kernel(&mut self, sampling_path: WindSamplingPath) {
         let recreate = match self.advection_dispatch_kernel.as_ref() {
             Some(kernel) => kernel.sampling_path() != sampling_path,
@@ -840,100 +1316,34 @@ impl ForwardTimeLoopDriver {
         }
     }
 
-    fn ensure_pbl_buffers(
+    /// Upload wind_t0 and wind_t1 to dual-time GPU buffers if the met bracket
+    /// changed. Creates the buffers on first call (the 3-D wind grid shape is
+    /// only known at first met bracket). Skips entirely when the bracket is
+    /// unchanged, since only `alpha` varies within a bracket.
+    fn upload_dual_wind_if_bracket_changed(
         &mut self,
-        pbl_state: &crate::pbl::PblState,
+        met: &MetTimeBracket<'_>,
     ) -> Result<(), TimeLoopError> {
-        if let Some(buffers) = &self.pbl_buffers {
-            buffers.upload_state(&self.gpu_context, pbl_state)?;
+        let bracket_changed = self.current_met_t0_seconds != Some(met.time_t0_seconds)
+            || self.current_met_t1_seconds != Some(met.time_t1_seconds);
+        if !bracket_changed {
             return Ok(());
         }
-        self.pbl_buffers = Some(PblBuffers::from_state(&self.gpu_context, pbl_state)?);
+
+        if let Some(buffers) = &self.dual_wind_buffers {
+            buffers.upload_t0(&self.gpu_context, met.wind_t0)?;
+            buffers.upload_t1(&self.gpu_context, met.wind_t1)?;
+        } else {
+            self.dual_wind_buffers = Some(DualWindBuffers::from_fields(
+                &self.gpu_context,
+                met.wind_t0,
+                met.wind_t1,
+            )?);
+        }
+
+        self.current_met_t0_seconds = Some(met.time_t0_seconds);
+        self.current_met_t1_seconds = Some(met.time_t1_seconds);
         Ok(())
-    }
-
-    fn ensure_hanna_params_output_buffer(
-        &mut self,
-        particle_count: usize,
-    ) -> Result<(), TimeLoopError> {
-        if particle_count == 0 {
-            return Ok(());
-        }
-        if let Some(buffer) = &self.hanna_params_output {
-            if buffer.particle_count() == particle_count {
-                return Ok(());
-            }
-        }
-        self.hanna_params_output = Some(HannaParamsOutputBuffer::new(
-            &self.gpu_context,
-            particle_count,
-        )?);
-        Ok(())
-    }
-
-    fn ensure_hanna_dispatch_kernel(&mut self) {
-        if self.hanna_dispatch_kernel.is_none() {
-            self.hanna_dispatch_kernel = Some(HannaDispatchKernel::new(&self.gpu_context));
-        }
-    }
-
-    fn ensure_langevin_dispatch_kernel(&mut self) {
-        if self.langevin_dispatch_kernel.is_none() {
-            self.langevin_dispatch_kernel = Some(LangevinDispatchKernel::new(&self.gpu_context));
-        }
-    }
-
-    fn ensure_dry_deposition_io_buffers(
-        &mut self,
-        deposition_velocity_m_s: &[f32],
-    ) -> Result<(), TimeLoopError> {
-        if let Some(io) = &self.dry_deposition_io {
-            if io.particle_count() == deposition_velocity_m_s.len() {
-                io.upload_deposition_velocity(&self.gpu_context, deposition_velocity_m_s)?;
-                return Ok(());
-            }
-        }
-        self.dry_deposition_io = Some(DryDepositionIoBuffers::from_velocity(
-            &self.gpu_context,
-            deposition_velocity_m_s,
-        )?);
-        Ok(())
-    }
-
-    fn ensure_dry_deposition_dispatch_kernel(&mut self) {
-        if self.dry_deposition_dispatch_kernel.is_none() {
-            self.dry_deposition_dispatch_kernel =
-                Some(DryDepositionDispatchKernel::new(&self.gpu_context));
-        }
-    }
-
-    fn ensure_wet_deposition_io_buffers(
-        &mut self,
-        scavenging_coefficient_s_inv: &[f32],
-        precipitating_fraction: &[f32],
-    ) -> Result<(), TimeLoopError> {
-        if let Some(io) = &self.wet_deposition_io {
-            if io.particle_count() == scavenging_coefficient_s_inv.len()
-                && io.particle_count() == precipitating_fraction.len()
-            {
-                io.upload_scavenging_coefficient(&self.gpu_context, scavenging_coefficient_s_inv)?;
-                io.upload_precipitating_fraction(&self.gpu_context, precipitating_fraction)?;
-                return Ok(());
-            }
-        }
-        self.wet_deposition_io = Some(WetDepositionIoBuffers::from_inputs(
-            &self.gpu_context,
-            scavenging_coefficient_s_inv,
-            precipitating_fraction,
-        )?);
-        Ok(())
-    }
-
-    fn ensure_wet_deposition_dispatch_kernel(&mut self) {
-        if self.wet_deposition_dispatch_kernel.is_none() {
-            self.wet_deposition_dispatch_kernel =
-                Some(WetDepositionDispatchKernel::new(&self.gpu_context));
-        }
     }
 
     async fn sync_store_from_gpu(&mut self) -> Result<(), TimeLoopError> {
@@ -966,6 +1376,21 @@ impl ForwardTimeLoopDriver {
 }
 
 /// Backward-mode integration driver (`ldirect = -1`) for receptor attribution.
+///
+/// Always uses the multi-dispatch path (separated Hanna, Langevin, dry/wet
+/// deposition) which is the same as the forward driver's validation mode.
+/// This gives full per-stage inspectability for scientific analysis.
+///
+/// Optimizations applied:
+/// - Dual-wind bracket tracking (O-02): `wind_t0`/`t1` uploaded once per met
+///   bracket, GPU interpolates inline.
+/// - GPU PBL diagnostics (O-04): surface fields uploaded, PBL computed on
+///   GPU. Falls back to CPU when `FLEXPART_GPU_PBL_CPU=1`.
+/// - Batched command encoder: all dispatches in a single `queue.submit()`.
+/// - Zero-forcing skip: deposition dispatches skipped when forcing is zero.
+///
+/// No pipeline overlap or compaction — backward mode always synchronizes
+/// every step for source attribution readback.
 pub struct BackwardTimeLoopDriver {
     config: BackwardTimeLoopConfig,
     current_time_seconds: i64,
@@ -977,12 +1402,33 @@ pub struct BackwardTimeLoopDriver {
     particle_store: ParticleStore,
     gpu_context: GpuContext,
     particle_buffers: ParticleBuffers,
-    wind_buffers: Option<WindBuffers>,
-    pbl_buffers: Option<PblBuffers>,
+    /// Dual-time wind buffers (O-02): t0 and t1 uploaded once per met bracket.
+    /// `None` until the first bracket upload (3-D grid shape unknown before).
+    dual_wind_buffers: Option<DualWindBuffers>,
+    dual_wind_dispatch_kernel: AdvectionDualWindDispatchKernel,
+    current_met_t0_seconds: Option<i64>,
+    current_met_t1_seconds: Option<i64>,
+    /// GPU PBL diagnostics kernel (O-04).
+    pbl_dispatch_kernel: PblDiagnosticsDispatchKernel,
+    /// GPU buffer for packed surface meteorological fields (O-04).
+    surface_field_buffer: SurfaceFieldBuffer,
+    /// Single PBL buffer (no double-buffering needed — backward syncs every step).
+    pbl_buffers: PblBuffers,
+    hanna_params_output: HannaParamsOutputBuffer,
+    hanna_dispatch_kernel: HannaDispatchKernel,
+    langevin_dispatch_kernel: LangevinDispatchKernel,
+    dry_deposition_io: DryDepositionIoBuffers,
+    dry_deposition_dispatch_kernel: DryDepositionDispatchKernel,
+    wet_deposition_io: WetDepositionIoBuffers,
+    wet_deposition_dispatch_kernel: WetDepositionDispatchKernel,
 }
 
 impl BackwardTimeLoopDriver {
     /// Create a new backward timeloop driver with empty particle store.
+    ///
+    /// All GPU buffers and dispatch kernels are pre-allocated here based on
+    /// `particle_capacity` and `release_grid` dimensions, following the
+    /// forward driver pattern (O-06).
     pub async fn new(
         config: BackwardTimeLoopConfig,
         release_grid: GridDomain,
@@ -990,6 +1436,7 @@ impl BackwardTimeLoopDriver {
     ) -> Result<Self, TimeLoopError> {
         let (start_time_seconds, end_time_seconds) = validate_backward_config(&config)?;
         let initial_philox_counter = config.initial_philox_counter;
+        let met_grid_shape = (release_grid.nx, release_grid.ny);
         let release_manager = ReleaseManager::new(
             &build_receptor_release_configs(&config.receptors, &config.start_timestamp),
             release_grid.clone(),
@@ -997,6 +1444,30 @@ impl BackwardTimeLoopDriver {
         let particle_store = ParticleStore::with_capacity(particle_capacity);
         let gpu_context = GpuContext::new().await?;
         let particle_buffers = ParticleBuffers::from_store(&gpu_context, &particle_store);
+
+        let dual_wind_sampling_path = if gpu_context.supports_wind_texture_sampling() {
+            WindSamplingPath::SampledTexture3d
+        } else {
+            WindSamplingPath::BufferStorage
+        };
+        let dual_wind_dispatch_kernel =
+            AdvectionDualWindDispatchKernel::new(&gpu_context, dual_wind_sampling_path);
+
+        let pbl_dispatch_kernel = PblDiagnosticsDispatchKernel::new(&gpu_context);
+        let surface_field_buffer = SurfaceFieldBuffer::with_shape(&gpu_context, met_grid_shape);
+        let pbl_placeholder = crate::pbl::PblState::new(met_grid_shape.0, met_grid_shape.1);
+        let pbl_buffers = PblBuffers::from_state(&gpu_context, &pbl_placeholder)?;
+
+        let hanna_params_output = HannaParamsOutputBuffer::new(&gpu_context, particle_capacity)?;
+        let hanna_dispatch_kernel = HannaDispatchKernel::new(&gpu_context);
+        let langevin_dispatch_kernel = LangevinDispatchKernel::new(&gpu_context);
+
+        let zeros = vec![0.0_f32; particle_capacity];
+        let dry_deposition_io = DryDepositionIoBuffers::from_velocity(&gpu_context, &zeros)?;
+        let dry_deposition_dispatch_kernel = DryDepositionDispatchKernel::new(&gpu_context);
+        let wet_deposition_io =
+            WetDepositionIoBuffers::from_inputs(&gpu_context, &zeros, &zeros)?;
+        let wet_deposition_dispatch_kernel = WetDepositionDispatchKernel::new(&gpu_context);
 
         Ok(Self {
             config,
@@ -1009,8 +1480,20 @@ impl BackwardTimeLoopDriver {
             particle_store,
             gpu_context,
             particle_buffers,
-            wind_buffers: None,
-            pbl_buffers: None,
+            dual_wind_buffers: None,
+            dual_wind_dispatch_kernel,
+            current_met_t0_seconds: None,
+            current_met_t1_seconds: None,
+            pbl_dispatch_kernel,
+            surface_field_buffer,
+            pbl_buffers,
+            hanna_params_output,
+            hanna_dispatch_kernel,
+            langevin_dispatch_kernel,
+            dry_deposition_io,
+            dry_deposition_dispatch_kernel,
+            wet_deposition_io,
+            wet_deposition_dispatch_kernel,
         })
     }
 
@@ -1039,6 +1522,11 @@ impl BackwardTimeLoopDriver {
     }
 
     /// Run one orchestrated backward timestep.
+    ///
+    /// All GPU dispatches are encoded into a single command encoder and
+    /// submitted in one `queue.submit()` call. The driver always waits for
+    /// GPU completion and downloads particle state, because source
+    /// attribution needs host-side particle data.
     pub async fn run_timestep(
         &mut self,
         met: &MetTimeBracket<'_>,
@@ -1063,14 +1551,9 @@ impl BackwardTimeLoopDriver {
             self.config.time_bounds_behavior,
         )?;
 
-        let interpolated_wind = interpolate_wind_field_linear(
-            met.wind_t0,
-            met.wind_t1,
-            met.time_t0_seconds,
-            met.time_t1_seconds,
-            self.current_time_seconds,
-            self.config.time_bounds_behavior,
-        )?;
+        // O-02: upload wind_t0/t1 once per met bracket.
+        self.upload_dual_wind_if_bracket_changed(met)?;
+
         let interpolated_surface = interpolate_surface_fields_linear(
             met.surface_t0,
             met.surface_t1,
@@ -1080,81 +1563,147 @@ impl BackwardTimeLoopDriver {
             self.config.time_bounds_behavior,
         )?;
 
-        let computed_pbl = compute_pbl_parameters_from_met(
-            PblMetInputGrids {
-                surface: &interpolated_surface,
-                profile: None,
-            },
-            self.config.pbl_options,
-        )?;
-
-        self.ensure_wind_buffers(&interpolated_wind)?;
-        self.ensure_pbl_buffers(&computed_pbl.pbl_state)?;
+        // O-04: GPU PBL by default; CPU fallback with FLEXPART_GPU_PBL_CPU=1.
+        let use_gpu_pbl = is_gpu_pbl_enabled();
+        if use_gpu_pbl {
+            self.surface_field_buffer
+                .upload(&self.gpu_context, &interpolated_surface)?;
+        } else {
+            let computed_pbl = compute_pbl_parameters_from_met(
+                PblMetInputGrids {
+                    surface: &interpolated_surface,
+                    profile: None,
+                },
+                self.config.pbl_options,
+            )?;
+            self.pbl_buffers
+                .upload_state(&self.gpu_context, &computed_pbl.pbl_state)?;
+        }
 
         let dt_seconds = timestep_seconds_f32(self.config.timestep_seconds)?;
-        let wind_buffers = self
-            .wind_buffers
-            .as_ref()
-            .expect("wind buffers are initialized by ensure_wind_buffers");
-        advect_particles_gpu(
-            &self.gpu_context,
-            &self.particle_buffers,
-            wind_buffers,
-            TimeDirection::Backward.advection_dt_seconds(dt_seconds),
-            self.config.velocity_to_grid_scale,
-        )?;
 
-        // B-01 MVP: keep turbulence/deposition kernels on positive dt magnitude.
-        let pbl_buffers = self
-            .pbl_buffers
-            .as_ref()
-            .expect("pbl buffers are initialized by ensure_pbl_buffers");
-        let hanna_params =
-            compute_hanna_params_gpu(&self.gpu_context, &self.particle_buffers, pbl_buffers)
-                .await?;
-        self.philox_counter = update_particles_turbulence_langevin_gpu(
-            &self.gpu_context,
-            &self.particle_buffers,
-            &hanna_params,
-            LangevinStep {
+        let skip_dry_deposition = forcing.dry_deposition_velocity_m_s.is_zero();
+        let skip_wet_deposition = forcing.wet_scavenging_coefficient_s_inv.is_zero()
+            && forcing.wet_precipitating_fraction.is_zero();
+
+        let slot_count = self.particle_buffers.capacity();
+        if !skip_dry_deposition {
+            let dry_velocity = forcing
+                .dry_deposition_velocity_m_s
+                .materialize(slot_count, "dry_deposition_velocity_m_s")?;
+            self.dry_deposition_io
+                .upload_deposition_velocity(&self.gpu_context, &dry_velocity)?;
+        }
+        if !skip_wet_deposition {
+            let wet_scavenging = forcing
+                .wet_scavenging_coefficient_s_inv
+                .materialize(slot_count, "wet_scavenging_coefficient_s_inv")?;
+            let wet_fraction = forcing
+                .wet_precipitating_fraction
+                .materialize(slot_count, "wet_precipitating_fraction")?;
+            self.wet_deposition_io
+                .upload_scavenging_coefficient(&self.gpu_context, &wet_scavenging)?;
+            self.wet_deposition_io
+                .upload_precipitating_fraction(&self.gpu_context, &wet_fraction)?;
+        }
+
+        // ── Encode all GPU dispatches in a single command encoder ──────
+        let next_philox_counter = {
+            let mut encoder =
+                self.gpu_context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("backward_timeloop_step_encoder"),
+                    });
+
+            if use_gpu_pbl {
+                encode_pbl_diagnostics_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.surface_field_buffer,
+                    &self.pbl_buffers,
+                    &self.config.pbl_options,
+                    &self.pbl_dispatch_kernel,
+                    &mut encoder,
+                )?;
+            }
+
+            // Advection: negative dt for backward time direction.
+            let dual_wind = self
+                .dual_wind_buffers
+                .as_ref()
+                .expect("dual wind buffers uploaded by upload_dual_wind_if_bracket_changed");
+            encode_advection_dual_wind_gpu_with_kernel(
+                &self.gpu_context,
+                &self.particle_buffers,
+                dual_wind,
+                interpolation_alpha,
+                TimeDirection::Backward.advection_dt_seconds(dt_seconds),
+                self.config.velocity_to_grid_scale,
+                &self.dual_wind_dispatch_kernel,
+                &mut encoder,
+            )?;
+
+            // B-01 MVP: turbulence and deposition use positive dt magnitude.
+            let langevin_step = LangevinStep {
                 dt_seconds,
                 rho_grad_over_rho: forcing.rho_grad_over_rho,
                 n_substeps: 4,
                 min_height_m: 0.01,
-            },
-            self.config.philox_key,
-            self.philox_counter,
-        )?;
+            };
 
-        let slot_count = self.particle_buffers.particle_count();
-        let dry_velocity = forcing
-            .dry_deposition_velocity_m_s
-            .materialize(slot_count, "dry_deposition_velocity_m_s")?;
-        let wet_scavenging = forcing
-            .wet_scavenging_coefficient_s_inv
-            .materialize(slot_count, "wet_scavenging_coefficient_s_inv")?;
-        let wet_fraction = forcing
-            .wet_precipitating_fraction
-            .materialize(slot_count, "wet_precipitating_fraction")?;
+            encode_hanna_params_gpu_with_kernel(
+                &self.gpu_context,
+                &self.particle_buffers,
+                &self.pbl_buffers,
+                &self.hanna_params_output,
+                &self.hanna_dispatch_kernel,
+                &mut encoder,
+            )?;
 
-        let _ = apply_dry_deposition_step_gpu(
-            &self.gpu_context,
-            &self.particle_buffers,
-            &dry_velocity,
-            DryDepositionStepParams {
-                dt_seconds,
-                reference_height_m: self.config.dry_reference_height_m,
-            },
-        )
-        .await?;
-        let _ = apply_wet_deposition_step_gpu(
-            &self.gpu_context,
-            &self.particle_buffers,
-            &wet_scavenging,
-            &wet_fraction,
-            WetDepositionStepParams { dt_seconds },
-        )
-        .await?;
+            let next_pc =
+                encode_update_particles_turbulence_langevin_gpu_with_hanna_buffer_and_kernel(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    &self.hanna_params_output.buffer,
+                    self.hanna_params_output.particle_count(),
+                    langevin_step,
+                    self.config.philox_key,
+                    self.philox_counter,
+                    &self.langevin_dispatch_kernel,
+                    &mut encoder,
+                )?;
+
+            if !skip_dry_deposition {
+                encode_dry_deposition_probability_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    &self.dry_deposition_io,
+                    DryDepositionStepParams {
+                        dt_seconds,
+                        reference_height_m: self.config.dry_reference_height_m,
+                    },
+                    &self.dry_deposition_dispatch_kernel,
+                    &mut encoder,
+                )?;
+            }
+
+            if !skip_wet_deposition {
+                encode_wet_deposition_probability_gpu_with_kernel(
+                    &self.gpu_context,
+                    &self.particle_buffers,
+                    &self.wet_deposition_io,
+                    WetDepositionStepParams { dt_seconds },
+                    &self.wet_deposition_dispatch_kernel,
+                    &mut encoder,
+                )?;
+            }
+
+            self.gpu_context.queue.submit(Some(encoder.finish()));
+            next_pc
+        };
+
+        self.gpu_context.device.poll(wgpu::Maintain::Wait);
+        self.philox_counter = next_philox_counter;
 
         self.sync_store_from_gpu().await?;
         let source_collections = collect_source_collections(
@@ -1195,24 +1744,32 @@ impl BackwardTimeLoopDriver {
         Ok(reports)
     }
 
-    fn ensure_wind_buffers(&mut self, wind: &WindField3D) -> Result<(), TimeLoopError> {
-        if let Some(buffers) = &self.wind_buffers {
-            buffers.upload_field(&self.gpu_context, wind)?;
-            return Ok(());
-        }
-        self.wind_buffers = Some(WindBuffers::from_field(&self.gpu_context, wind)?);
-        Ok(())
-    }
-
-    fn ensure_pbl_buffers(
+    /// Upload wind_t0 and wind_t1 to dual-time GPU buffers if the met bracket
+    /// changed. Creates buffers on first call. Skips when the bracket is
+    /// unchanged (only `alpha` varies within a bracket).
+    fn upload_dual_wind_if_bracket_changed(
         &mut self,
-        pbl_state: &crate::pbl::PblState,
+        met: &MetTimeBracket<'_>,
     ) -> Result<(), TimeLoopError> {
-        if let Some(buffers) = &self.pbl_buffers {
-            buffers.upload_state(&self.gpu_context, pbl_state)?;
+        let bracket_changed = self.current_met_t0_seconds != Some(met.time_t0_seconds)
+            || self.current_met_t1_seconds != Some(met.time_t1_seconds);
+        if !bracket_changed {
             return Ok(());
         }
-        self.pbl_buffers = Some(PblBuffers::from_state(&self.gpu_context, pbl_state)?);
+
+        if let Some(buffers) = &self.dual_wind_buffers {
+            buffers.upload_t0(&self.gpu_context, met.wind_t0)?;
+            buffers.upload_t1(&self.gpu_context, met.wind_t1)?;
+        } else {
+            self.dual_wind_buffers = Some(DualWindBuffers::from_fields(
+                &self.gpu_context,
+                met.wind_t0,
+                met.wind_t1,
+            )?);
+        }
+
+        self.current_met_t0_seconds = Some(met.time_t0_seconds);
+        self.current_met_t1_seconds = Some(met.time_t1_seconds);
         Ok(())
     }
 

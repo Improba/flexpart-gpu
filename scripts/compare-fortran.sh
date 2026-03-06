@@ -22,6 +22,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FLEXPART_DIR="$(cd "${PROJECT_ROOT}/../flexpart" && pwd)"
+FORTRAN_DOCKER_DIR="$(cd "${PROJECT_ROOT}/../flexpart-fortran-docker" && pwd)"
 
 C_FLEXPART="/workspace/flexpart"
 C_GPU="/workspace/flexpart-gpu"
@@ -33,14 +34,19 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # ---------------------------------------------------------------------------
-compose_cmd() { local m="$1"; shift
+# Fortran Docker is in a sibling directory (../flexpart-fortran-docker/)
+# GPU Docker is in this project
+fortran_compose_cmd() { local m="$1"; shift
+  docker compose -f "${FORTRAN_DOCKER_DIR}/docker-compose.yml" "$@"
+}
+gpu_compose_cmd() { local m="$1"; shift
   case "$m" in
     compose) docker compose "$@" ;;
     nvidia)  docker compose -f docker-compose.yml -f docker-compose.nvidia.yml "$@" ;;
   esac
 }
-fortran_exec() { local m="$1"; shift; compose_cmd "$m" run --rm flexpart-fortran "$@"; }
-gpu_exec()     { local m="$1"; shift; compose_cmd "$m" run --rm flexpart-gpu "$@"; }
+fortran_exec() { local m="$1"; shift; fortran_compose_cmd "$m" run --rm flexpart-fortran "$@"; }
+gpu_exec()     { local m="$1"; shift; gpu_compose_cmd "$m" run --rm flexpart-gpu "$@"; }
 
 # ---------------------------------------------------------------------------
 # SETUP
@@ -49,7 +55,8 @@ do_setup() {
   local mode="$1"
 
   log_info "Building Docker images..."
-  compose_cmd "$mode" build
+  fortran_compose_cmd "$mode" build
+  gpu_compose_cmd "$mode" build
 
   log_info "Compiling FLEXPART Fortran..."
   fortran_exec "$mode" bash -c "
@@ -253,7 +260,7 @@ do_validate_setup() {
   local mode="$1"
 
   log_info "Building Docker images..."
-  compose_cmd "$mode" build
+  fortran_compose_cmd "$mode" build
 
   log_info "Compiling FLEXPART Fortran..."
   fortran_exec "$mode" bash -c "
@@ -441,7 +448,8 @@ do_validate() {
 do_clean() {
   local mode="$1"
   log_info "Cleaning up..."
-  compose_cmd "$mode" down -v --remove-orphans 2>/dev/null || true
+  fortran_compose_cmd "$mode" down -v --remove-orphans 2>/dev/null || true
+  gpu_compose_cmd "$mode" down -v --remove-orphans 2>/dev/null || true
   rm -f "${PROJECT_ROOT}/target/gpu-comparison.log"
   rm -f "${PROJECT_ROOT}/target/fortran-comparison.log"
   log_info "Done."

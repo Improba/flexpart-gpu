@@ -58,9 +58,11 @@ separately by the Langevin equation.
 
 | File | Role |
 |------|------|
-| `src/shaders/advection.wgsl` | GPU kernel |
+| `src/shaders/advection_texture_dual_wind.wgsl` | Production — 3D texture-sampled dual-wind advection |
+| `src/shaders/advection_dual_wind.wgsl` | Buffer-based dual-wind advection (fallback / validation) |
+| `src/shaders/advection.wgsl` | Legacy single-wind advection |
 | `src/physics/advection.rs` | CPU reference |
-| `src/gpu/advection.rs` | GPU dispatch and buffer setup |
+| `src/gpu/advection.rs` | Advection dispatch and buffer setup (both paths) |
 
 ## References
 
