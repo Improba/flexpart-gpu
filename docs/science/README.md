@@ -10,6 +10,7 @@ to the underlying literature.
 | Document | Topic |
 |----------|-------|
 | [lagrangian-particle-dispersion.md](lagrangian-particle-dispersion.md) | Overview of the Lagrangian particle dispersion method and time integration |
+| [simulation-flow.md](simulation-flow.md) | Step-by-step execution flow of a simulation (what runs when, CPU vs GPU) |
 | [advection.md](advection.md) | Mean-wind advection (Petterssen predictor–corrector) |
 | [turbulent-diffusion.md](turbulent-diffusion.md) | Langevin equation and Hanna (1982) turbulence parameterisation |
 | [deposition.md](deposition.md) | Dry deposition (resistance model) and wet scavenging |

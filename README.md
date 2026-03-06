@@ -36,10 +36,13 @@ The benchmark methodology and recommended commands are documented in `docs/bench
 
 ## Documentation
 
-- Scientific foundations of the model: [`docs/science/`](docs/science/README.md)
-- ETEX simulation quickstart: [`docs/quickstart.md`](docs/quickstart.md)
-- Synthetic validation report: [`docs/validation-report.md`](docs/validation-report.md)
-- Detailed ETEX report (work in progress): [`docs/temp/phase-d-etex-report.md`](docs/temp/phase-d-etex-report.md)
+Full documentation index: [`docs/`](docs/README.md)
+
+- Quickstart (first simulation): [`docs/quickstart.md`](docs/quickstart.md)
+- Architecture & source tree: [`docs/architecture.md`](docs/architecture.md)
+- Development guide (build, Docker, test): [`docs/development.md`](docs/development.md)
+- Scientific foundations: [`docs/science/`](docs/science/README.md)
+- Validation report: [`docs/validation-report.md`](docs/validation-report.md)
 
 ## Contact
 
