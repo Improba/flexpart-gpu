@@ -297,8 +297,8 @@ scripts/compare-fortran.sh compose validate
 
 ### Reports
 
-Detailed benchmark results are in `docs/temp/`:
+Detailed benchmark results are in `docs/benchmarks/`:
 
-- [`benchmark-performance-scaling.md`](temp/benchmark-performance-scaling.md) — particle count scaling (10K–1M), GPU vs Fortran serial, readback on/off, MPI context.
-- [`benchmark-1m-fortran-vs-gpu0.md`](temp/benchmark-1m-fortran-vs-gpu0.md) — scientific comparison at 1M particles (clean aligned gridding, COM, correlation, known differences).
-- [`benchmark-scientific-validation.md`](temp/benchmark-scientific-validation.md) — physics-focused validation report: advection, vertical/horizontal diffusion, vertical profile analysis, aligned physics inventory.
+- [`benchmark-performance-scaling.md`](benchmarks/benchmark-performance-scaling.md) — particle count scaling (10K–1M), GPU vs Fortran serial, readback on/off, MPI context.
+- [`benchmark-1m-fortran-vs-gpu0.md`](benchmarks/benchmark-1m-fortran-vs-gpu0.md) — scientific comparison at 1M particles (clean aligned gridding, COM, correlation, known differences).
+- [`benchmark-scientific-validation.md`](benchmarks/benchmark-scientific-validation.md) — physics-focused validation report: advection, vertical/horizontal diffusion, vertical profile analysis, aligned physics inventory.

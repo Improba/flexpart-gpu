@@ -128,14 +128,14 @@ effective turbulence intensity. This is a parameterization difference, not a bug
 | turb_w in advection         | Separate displacement | Separate (Langevin sub-step)  | Aligned               |
 | RNG                         | Fortran intrinsic     | Philox4x32-10                 | Different sequences   |
 | Horizontal turbulence       | Once per timestep     | Once per timestep             | Identical             |
-| PBL reflection              | advance.f90 sub-loop  | langevin.wgsl sub-loop        | Aligned               |
+| PBL reflection              | advance.f90 sub-loop  | langevin_fused.wgsl sub-loop  | Aligned               |
 | Above-PBL particles         | Soft (some escape)    | Hard (clamped at hmix)        | ~7% difference at top |
 
 ## 5. Test coverage
 
 | Test category              | Count | Status |
 |----------------------------|-------|--------|
-| Unit tests (all)           | 208+  | PASS   |
+| Unit tests (all)           | 224   | PASS   |
 | CPU/GPU parity (kernels)   | 10+   | PASS   |
 | Mass conservation          | 3     | PASS   |
 | Positivity invariants      | 2     | PASS   |
@@ -156,5 +156,8 @@ Remaining known differences:
 - Hard vs soft PBL ceiling (~7% of particles)
 - hmix computation method (GPU uses prescribed value vs Fortran's Richardson)
 
-These are architectural differences, not bugs. They will be further validated
-with real meteorological data (ETEX scenario) when available.
+These are architectural differences, not bugs. A detailed 1M-particle comparison
+with performance benchmarks is available in
+[benchmarks/benchmark-1m-fortran-vs-gpu0.md](benchmarks/benchmark-1m-fortran-vs-gpu0.md)
+and the physics validation report in
+[benchmarks/benchmark-scientific-validation.md](benchmarks/benchmark-scientific-validation.md).

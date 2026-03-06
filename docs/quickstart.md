@@ -92,4 +92,4 @@ The pipeline writes mainly to `target/etex/`, including:
 
 - Benchmarks: `docs/benchmarks.md`
 - Validation report: `docs/validation-report.md`
-- Detailed ETEX report: `docs/temp/phase-d-etex-report.md`
+- Scientific validation: `docs/benchmarks/benchmark-scientific-validation.md`
