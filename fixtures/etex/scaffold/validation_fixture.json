@@ -1,0 +1,92 @@
+{
+  "scenario_id": "etex_scaffold_mvp",
+  "description": "Synthetic ETEX-style tracer validation scaffold used until real ETEX/FLEXPART oracle files are available.",
+  "pipeline": {
+    "config_dir": "config",
+    "timestep_seconds": 1,
+    "particle_capacity": 1024
+  },
+  "synthetic_forcing": {
+    "wind_t0_ms": [0.15, 0.04, 0.0],
+    "wind_t1_ms": [0.7, 0.08, 0.01],
+    "surface_pressure_pa": 101325.0,
+    "temperature_2m_k": 288.5,
+    "dewpoint_2m_k": 283.0,
+    "friction_velocity_ms": 0.3,
+    "convective_velocity_scale_ms": 0.12,
+    "mixing_height_m": 1000.0,
+    "inv_obukhov_length_per_m": 0.0,
+    "surface_stress_n_m2": 0.2,
+    "sensible_heat_flux_w_m2": 10.0,
+    "solar_radiation_w_m2": 220.0,
+    "dry_deposition_velocity_m_s": 0.0035,
+    "wet_scavenging_coefficient_s_inv": 0.00005,
+    "wet_precipitating_fraction": 0.15,
+    "rho_grad_over_rho": 0.0
+  },
+  "output_scaffold": {
+    "concentration_shape": [16, 12, 6],
+    "gridding_species_index": 0,
+    "gridding_mass_scale": 1000000.0,
+    "dry_fraction_of_column_mass": 0.03,
+    "wet_fraction_of_column_mass": 0.06
+  },
+  "reference": {
+    "mode": "derived_from_candidate",
+    "dataset_path": null,
+    "concentration_mass_kg": {
+      "scale": 1.02,
+      "bias": 0.00001
+    },
+    "dry_deposition_kg_m2": {
+      "scale": 0.98,
+      "bias": 0.000001
+    },
+    "wet_deposition_kg_m2": {
+      "scale": 1.01,
+      "bias": -0.0000005
+    },
+    "notes": [
+      "Placeholder transforms are used for MVP metric plumbing.",
+      "Switch to explicit FLEXPART ETEX reference fields when datasets are available."
+    ],
+    "explicit_reference": null
+  },
+  "fixture_only_case": {
+    "candidate": {
+      "concentration_mass_kg": {
+        "shape": [2, 2],
+        "values": [1.0, 2.0, 3.0, 4.0]
+      },
+      "dry_deposition_kg_m2": {
+        "shape": [2, 2],
+        "values": [0.1, 0.2, 0.3, 0.4]
+      },
+      "wet_deposition_kg_m2": {
+        "shape": [2, 2],
+        "values": [0.05, 0.1, 0.15, 0.2]
+      }
+    },
+    "reference": {
+      "concentration_mass_kg": {
+        "shape": [2, 2],
+        "values": [1.0, 1.5, 2.5, 4.5]
+      },
+      "dry_deposition_kg_m2": {
+        "shape": [2, 2],
+        "values": [0.1, 0.21, 0.29, 0.39]
+      },
+      "wet_deposition_kg_m2": {
+        "shape": [2, 2],
+        "values": [0.04, 0.11, 0.14, 0.22]
+      }
+    },
+    "notes": [
+      "Deterministic fixture-only vectors for CI-safe metric regression tests."
+    ]
+  },
+  "notes": [
+    "ETEX scaffold fixture (MVP): no real ETEX meteorological input or FLEXPART oracle yet.",
+    "Structure intentionally mirrors future real-data plug-in flow."
+  ]
+}

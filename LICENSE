@@ -1,0 +1,12 @@
+GNU GENERAL PUBLIC LICENSE
+Version 3, 29 June 2007
+
+This project (`flexpart-gpu`) is distributed under the terms of the
+GNU General Public License, version 3 or (at your option) any later version
+(`GPL-3.0-or-later`), consistent with the upstream FLEXPART licensing.
+
+You can find the full GPLv3 license text at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+In this workspace, the upstream FLEXPART license file is available at:
+../flexpart/LICENSE

@@ -1,0 +1,11 @@
+&RELEASE
+  NAME = 'etex_scaffold_release',
+  START = '20240101000000',
+  END = '20240101000000',
+  LON = 4.5,
+  LAT = 3.5,
+  Z1 = 1.0,
+  Z2 = 1.0,
+  MASS = 10.0,
+  PARTICLES = 120
+/

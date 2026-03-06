@@ -1,0 +1,48 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  bash \
+  ca-certificates \
+  curl \
+  pkg-config \
+  # Vulkan / GPU
+  libvulkan1 \
+  mesa-vulkan-drivers \
+  libgl1-mesa-dri \
+  vulkan-tools \
+  libegl1 \
+  libxext6 \
+  # Scientific I/O
+  libeccodes-dev \
+  libnetcdf-dev \
+  libhdf5-dev \
+  netcdf-bin \
+  # Performance
+  libjemalloc2 \
+  # Build essentials
+  build-essential \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV WGPU_BACKEND=vulkan
+ENV XDG_RUNTIME_DIR=/tmp/xdg
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+
+RUN mkdir -p "${RUSTUP_HOME}" "${CARGO_HOME}" /workspace/flexpart-gpu/target "${XDG_RUNTIME_DIR}" \
+  && chmod 1777 "${XDG_RUNTIME_DIR}" \
+  && chmod -R 777 "${RUSTUP_HOME}" "${CARGO_HOME}" /workspace/flexpart-gpu/target \
+  && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+     | bash -s -- -y --profile minimal --default-toolchain stable \
+  && chmod -R 777 "${RUSTUP_HOME}" "${CARGO_HOME}" /workspace/flexpart-gpu/target \
+  && rustc --version \
+  && cargo --version
+
+WORKDIR /workspace/flexpart-gpu
+
+CMD ["bash"]

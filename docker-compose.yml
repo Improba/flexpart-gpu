@@ -1,0 +1,41 @@
+services:
+  flexpart-gpu:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.gpu
+    image: flexpart-gpu:latest
+    working_dir: /workspace/flexpart-gpu
+    user: "${UID:-1000}:${GID:-1000}"
+    stdin_open: true
+    tty: true
+    volumes:
+      # Source code (bind mount — edits on host appear instantly in container)
+      - .:/workspace/flexpart-gpu
+      # Fortran reference code (read-only for validation)
+      - ../flexpart:/workspace/flexpart:ro
+      # Cargo build cache (named volume — survives between container runs)
+      - cargo-home:/usr/local/cargo
+      - cargo-target:/workspace/flexpart-gpu/target
+    environment:
+      WGPU_BACKEND: "vulkan"
+      CARGO_HOME: "/usr/local/cargo"
+    command: ["bash"]
+
+  flexpart-fortran:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.fortran
+    image: flexpart-fortran:latest
+    working_dir: /workspace
+    user: "${UID:-1000}:${GID:-1000}"
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../flexpart:/workspace/flexpart
+      - .:/workspace/flexpart-gpu:ro
+      - ./target/comparison:/workspace/comparison
+    command: ["bash"]
+
+volumes:
+  cargo-home:
+  cargo-target:

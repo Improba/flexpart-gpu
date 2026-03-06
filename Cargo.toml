@@ -1,0 +1,37 @@
+[package]
+name = "flexpart-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-accelerated FLEXPART Lagrangian particle dispersion model"
+license = "GPL-3.0-or-later"
+
+[features]
+default = []
+eccodes = ["dep:eccodes"]
+netcdf = ["dep:netcdf"]
+
+[dependencies]
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+ndarray = "0.16"
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eccodes = { version = "0.14", optional = true }
+netcdf = { version = "0.12.0", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+approx = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[[bench]]
+name = "advection"
+harness = false

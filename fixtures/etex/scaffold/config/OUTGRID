@@ -1,0 +1,12 @@
+&OUTGRID
+  LON_MIN = 0.0,
+  LON_MAX = 16.0,
+  LAT_MIN = 0.0,
+  LAT_MAX = 12.0,
+  NX = 16,
+  NY = 12,
+  NZ = 6,
+  DX = 1.0,
+  DY = 1.0,
+  DZ = 1.0
+/
