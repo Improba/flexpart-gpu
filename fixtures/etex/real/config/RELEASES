@@ -1,0 +1,20 @@
+&RELEASES_CTRL
+ NSPEC      =           1,
+ SPECNUM_REL=          24,
+ /
+&RELEASE
+ IDATE1  =       19941023,
+ ITIME1  =         160000,
+ IDATE2  =       19941024,
+ ITIME2  =         034000,
+ LON1    =         -2.000,
+ LON2    =         -2.000,
+ LAT1    =         48.058,
+ LAT2    =         48.058,
+ Z1      =          5.000,
+ Z2      =         15.000,
+ ZKIND   =              1,
+ MASS    =   3.4000E+05,
+ PARTS   =         100000,
+ COMMENT =    "ETEX1_PMCH",
+ /
