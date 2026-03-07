@@ -2,6 +2,11 @@
 
 Rust/WebGPU port of FLEXPART for scientific exploration, numerical validation, and CPU (Fortran/Rust) vs GPU performance evaluation.
 
+## Project status and relationship to upstream
+
+`flexpart-gpu` is an independent and unofficial project inspired by, and partially derived from, FLEXPART.
+It is not affiliated with or endorsed by the official FLEXPART development team.
+
 ## Context
 
 This project re-implements FLEXPART components in Rust and WGSL, with a focus on:
@@ -43,6 +48,15 @@ Practical implications for distribution:
 
 This project explicitly acknowledges the scientific and software origins of FLEXPART.
 Primary credit for the model foundations, methods, and scientific validation goes to the FLEXPART team.
+
+Upstream references:
+
+- FLEXPART home page: <https://www.flexpart.eu/>
+- FLEXPART v11 repository: <https://gitlab.phaidra.org/flexpart/flexpart>
+
+Key publication:
+
+- Bakels et al. (2024), Geosci. Model Dev., 17, 7595-7624, <https://doi.org/10.5194/gmd-17-7595-2024>
 
 See `NOTICE.md` for attribution and compliance details.
 

@@ -4,10 +4,13 @@
 
 `flexpart-gpu` is a Rust/WebGPU port of FLEXPART components.
 The scientific concepts, physical schemes, and part of the algorithmic structures originate from the upstream FLEXPART project.
+This repository is an independent and unofficial effort and is not affiliated with, or endorsed by, the official FLEXPART development team.
 
 ## Upstream reference
 
 - Original project: FLEXPART
+- Official home page: <https://www.flexpart.eu/>
+- Upstream v11 repository: <https://gitlab.phaidra.org/flexpart/flexpart>
 - Upstream license observed in this workspace: `GPL-3.0-or-later`
 - Upstream license file: `../flexpart/LICENSE`
 
@@ -28,4 +31,4 @@ The use of AI tools to assist with translation/porting does not affect the licen
 ## Project contact
 
 Sylvain Meylan (Improba)  
-Email: `A_RENSEIGNER`
+Email: `sylvain.meylan@improba.fr`
