@@ -8,9 +8,10 @@ use flexpart_gpu::coords::GridDomain;
 use flexpart_gpu::gpu::{
     accumulate_concentration_grid_gpu, advect_particles_gpu, apply_dry_deposition_step_gpu,
     apply_wet_deposition_step_gpu, auto_tune_key_kernels, compute_hanna_params_gpu,
-    save_autotune_report_default, update_particles_turbulence_langevin_gpu, ConcentrationGridShape,
-    ConcentrationGriddingParams, DryDepositionStepParams, GpuContext, GpuError, MAX_OUTPUT_LEVELS,
-    ParticleBuffers,
+    encode_langevin_fused_gpu, save_autotune_report_default,
+    update_particles_turbulence_langevin_gpu, ConcentrationGridShape,
+    ConcentrationGriddingParams, DryDepositionStepParams, GpuContext, GpuError,
+    LangevinFusedDispatchKernel, MAX_OUTPUT_LEVELS, ParticleBuffers,
     PblBuffers, ScopedWorkgroupOverride, WetDepositionStepParams, WindBuffers,
     WorkgroupAutoTuneOptions, WorkgroupKernel,
 };
@@ -421,18 +422,6 @@ fn maybe_run_workgroup_autotune(runtime: BenchRuntimeConfig, ctx: &GpuContext) {
             return;
         }
     };
-    let hanna_params = match pollster::block_on(compute_hanna_params_gpu(
-        ctx,
-        &particle_buffers,
-        &pbl_buffers,
-    )) {
-        Ok(params) => params,
-        Err(err) => {
-            eprintln!("workgroup autotune skipped: Hanna baseline failed: {err}");
-            return;
-        }
-    };
-
     let dry_velocity = deterministic_scalar_field(tuning_particles, 0.001, 0.00001, 41);
     let wet_scavenging = deterministic_scalar_field(tuning_particles, 0.0005, 0.00001, 73);
     let wet_fraction: Vec<f32> = (0..tuning_particles)
@@ -443,6 +432,7 @@ fn maybe_run_workgroup_autotune(runtime: BenchRuntimeConfig, ctx: &GpuContext) {
         ny: BENCH_GRID_NY,
         nz: BENCH_GRID_NZ,
     };
+    let mut fused_langevin_kernels: BTreeMap<u32, LangevinFusedDispatchKernel> = BTreeMap::new();
 
     let mut options = WorkgroupAutoTuneOptions::from_env();
     if let Some(candidates) = parse_env_u32_list("FLEXPART_BENCH_AUTOTUNE_CANDIDATES") {
@@ -482,16 +472,30 @@ fn maybe_run_workgroup_autotune(runtime: BenchRuntimeConfig, ctx: &GpuContext) {
                 particle_buffers
                     .upload_particles(ctx, &particles)
                     .map_err(|err| err.to_string())?;
+                // Tune against the production turbulence path (fused Hanna+Langevin),
+                // not the legacy separated Langevin kernel used only for validation.
+                let fused_kernel = fused_langevin_kernels
+                    .entry(candidate)
+                    .or_insert_with(|| LangevinFusedDispatchKernel::new(ctx));
                 let started = std::time::Instant::now();
-                let next_counter = update_particles_turbulence_langevin_gpu(
+                let mut encoder = ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("bench_autotune_langevin_fused"),
+                    });
+                let next_counter = encode_langevin_fused_gpu(
                     ctx,
                     &particle_buffers,
-                    &hanna_params,
+                    &pbl_buffers,
                     LangevinStep::legacy(1.0, 2.5e-4),
-                    [0xDECA_FBAD, 0x1234_5678],
-                    [0, 0, 0, 0],
+                    BENCH_LANGEVIN_KEY,
+                    BENCH_LANGEVIN_COUNTER,
+                    fused_kernel,
+                    &mut encoder,
                 )
                 .map_err(|err| err.to_string())?;
+                ctx.queue.submit(Some(encoder.finish()));
+                let _ = ctx.device.poll(wgpu::MaintainBase::Wait);
                 std::hint::black_box(next_counter);
                 Ok(started.elapsed())
             }

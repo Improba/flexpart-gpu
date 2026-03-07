@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use flexpart_gpu::config::ReleaseConfig;
 use flexpart_gpu::coords::GridDomain;
@@ -104,28 +106,33 @@ struct MetSnapshot {
     epoch_seconds: i64,
 }
 
+struct MetSnapshotPrefetch {
+    target_idx: usize,
+    handle: JoinHandle<Result<MetSnapshot, String>>,
+}
+
 fn load_met_snapshot(
     met_dir: &Path,
     entry: &TimestepEntry,
     nx: usize,
     ny: usize,
     nz: usize,
-) -> MetSnapshot {
+) -> Result<MetSnapshot, String> {
     let path = met_dir.join(&entry.file);
-    let data = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let data = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     let n3d = nx * ny * nz;
     let n2d = nx * ny;
     let f32_size = std::mem::size_of::<f32>();
     let expected = (8 * n3d + 15 * n2d) * f32_size;
-    assert_eq!(
-        data.len(),
-        expected,
-        "file {} has {} bytes, expected {}",
-        entry.file,
-        data.len(),
-        expected
-    );
+    if data.len() != expected {
+        return Err(format!(
+            "file {} has {} bytes, expected {}",
+            entry.file,
+            data.len(),
+            expected
+        ));
+    }
 
     let floats: Vec<f32> = data
         .chunks_exact(f32_size)
@@ -137,12 +144,12 @@ fn load_met_snapshot(
     let read_3d = |off: &mut usize| -> Array3<f32> {
         let slice = &floats[*off..*off + n3d];
         *off += n3d;
-        Array3::from_shape_vec((nx, ny, nz), slice.to_vec()).unwrap()
+        Array3::from_shape_vec((nx, ny, nz), slice.to_vec()).expect("validated shape")
     };
     let read_2d = |off: &mut usize| -> Array2<f32> {
         let slice = &floats[*off..*off + n2d];
         *off += n2d;
-        Array2::from_shape_vec((nx, ny), slice.to_vec()).unwrap()
+        Array2::from_shape_vec((nx, ny), slice.to_vec()).expect("validated shape")
     };
 
     let u = read_3d(&mut offset);
@@ -170,7 +177,7 @@ fn load_met_snapshot(
     let tropo = read_2d(&mut offset);
     let oli = read_2d(&mut offset);
 
-    MetSnapshot {
+    Ok(MetSnapshot {
         wind: WindField3D {
             u_ms: u,
             v_ms: v,
@@ -199,7 +206,41 @@ fn load_met_snapshot(
             inv_obukhov_length_per_m: oli,
         },
         epoch_seconds: entry.epoch_seconds,
+    })
+}
+
+fn start_met_prefetch(
+    met_dir: &Path,
+    entry: &TimestepEntry,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    target_idx: usize,
+) -> MetSnapshotPrefetch {
+    let met_dir = met_dir.to_path_buf();
+    let file = entry.file.clone();
+    let epoch_seconds = entry.epoch_seconds;
+    let handle = std::thread::spawn(move || {
+        let entry = TimestepEntry { epoch_seconds, file };
+        load_met_snapshot(&met_dir, &entry, nx, ny, nz)
+    });
+    MetSnapshotPrefetch { target_idx, handle }
+}
+
+fn consume_prefetch(
+    prefetch: MetSnapshotPrefetch,
+    expected_idx: usize,
+) -> Result<MetSnapshot, String> {
+    if prefetch.target_idx != expected_idx {
+        return Err(format!(
+            "prefetch target mismatch: got {}, expected {}",
+            prefetch.target_idx, expected_idx
+        ));
     }
+    prefetch
+        .handle
+        .join()
+        .map_err(|_| format!("prefetch worker panicked for index {expected_idx}"))?
 }
 
 fn main() {
@@ -217,6 +258,9 @@ fn main() {
 
     let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
     let manifest: Manifest = serde_json::from_str(&manifest_text).expect("parse manifest");
+    let prefetch_enabled = std::env::var("ETEX_STREAM_PREFETCH")
+        .map(|v| v != "0")
+        .unwrap_or(true);
 
     let met_dir = manifest_path.parent().unwrap();
     let nx = manifest.nx;
@@ -252,6 +296,7 @@ fn main() {
         "simulation: {} → {}, dt={}s",
         manifest.simulation.start, manifest.simulation.end, manifest.simulation.dt_seconds
     );
+    eprintln!("met prefetch: {}", if prefetch_enabled { "enabled" } else { "disabled" });
 
     let center_lat = manifest.release.lat;
     let lat_rad = center_lat * std::f64::consts::PI / 180.0;
@@ -322,17 +367,41 @@ fn main() {
     };
     eprintln!("GPU driver ready");
 
-    // Load all met snapshots
+    if manifest.timesteps.len() < 2 {
+        eprintln!(
+            "ERROR: manifest needs at least 2 met snapshots, got {}",
+            manifest.timesteps.len()
+        );
+        std::process::exit(1);
+    }
+
     eprintln!(
-        "loading {} met snapshots...",
+        "loading first met bracket (streaming mode, {} snapshots total)...",
         manifest.timesteps.len()
     );
-    let snapshots: Vec<MetSnapshot> = manifest
-        .timesteps
-        .iter()
-        .map(|ts| load_met_snapshot(met_dir, ts, nx, ny, nz))
-        .collect();
-    eprintln!("met data loaded");
+    let init_load_start = Instant::now();
+    let mut current_snapshot = load_met_snapshot(met_dir, &manifest.timesteps[0], nx, ny, nz)
+        .unwrap_or_else(|e| panic!("load timestep 0 failed: {e}"));
+    let mut next_snapshot = load_met_snapshot(met_dir, &manifest.timesteps[1], nx, ny, nz)
+        .unwrap_or_else(|e| panic!("load timestep 1 failed: {e}"));
+    let init_load_ms = init_load_start.elapsed().as_secs_f64() * 1_000.0;
+    let mut prefetch = if prefetch_enabled && manifest.timesteps.len() > 2 {
+        Some(start_met_prefetch(
+            met_dir,
+            &manifest.timesteps[2],
+            nx,
+            ny,
+            nz,
+            2,
+        ))
+    } else {
+        None
+    };
+    let mut prefetch_hits = 0_usize;
+    let mut prefetch_misses = 0_usize;
+    let mut met_wait_prefetch_ms = 0.0_f64;
+    let mut met_wait_sync_ms = 0.0_f64;
+    eprintln!("met streaming initialized");
 
     let forcing = ForwardStepForcing {
         dry_deposition_velocity_m_s: ParticleForcingField::Uniform(0.0),
@@ -360,9 +429,9 @@ fn main() {
     eprintln!("running simulation...");
 
     let mut bracket_idx = 0_usize;
-    while driver.has_remaining_steps() && bracket_idx + 1 < snapshots.len() {
-        let t0 = &snapshots[bracket_idx];
-        let t1 = &snapshots[bracket_idx + 1];
+    while driver.has_remaining_steps() && bracket_idx + 1 < manifest.timesteps.len() {
+        let t0 = &current_snapshot;
+        let t1 = &next_snapshot;
 
         let met = MetTimeBracket {
             wind_t0: &t0.wind,
@@ -384,7 +453,7 @@ fn main() {
                     "  t+{:.1}h (bracket {}/{}): {} active particles",
                     t_h,
                     bracket_idx,
-                    snapshots.len() - 1,
+                    manifest.timesteps.len() - 1,
                     report.active_particle_count
                 );
 
@@ -417,6 +486,43 @@ fn main() {
             }
         }
         bracket_idx += 1;
+
+        if bracket_idx + 1 >= manifest.timesteps.len() {
+            break;
+        }
+
+        current_snapshot = next_snapshot;
+        let needed_idx = bracket_idx + 1;
+
+        next_snapshot = if let Some(handle) = prefetch.take() {
+            prefetch_hits += 1;
+            let t_wait = Instant::now();
+            let result = consume_prefetch(handle, needed_idx)
+                .unwrap_or_else(|e| panic!("consume prefetch for index {needed_idx} failed: {e}"))
+                ;
+            met_wait_prefetch_ms += t_wait.elapsed().as_secs_f64() * 1_000.0;
+            result
+        } else {
+            prefetch_misses += 1;
+            let t_wait = Instant::now();
+            let result = load_met_snapshot(met_dir, &manifest.timesteps[needed_idx], nx, ny, nz)
+                .unwrap_or_else(|e| panic!("load timestep {needed_idx} failed: {e}"))
+                ;
+            met_wait_sync_ms += t_wait.elapsed().as_secs_f64() * 1_000.0;
+            result
+        };
+
+        let upcoming_idx = bracket_idx + 2;
+        if prefetch_enabled && upcoming_idx < manifest.timesteps.len() {
+            prefetch = Some(start_met_prefetch(
+                met_dir,
+                &manifest.timesteps[upcoming_idx],
+                nx,
+                ny,
+                nz,
+                upcoming_idx,
+            ));
+        }
     }
 
     let active = timestep_outputs
@@ -428,6 +534,17 @@ fn main() {
         total_steps,
         timestep_outputs.len(),
         active
+    );
+    eprintln!(
+        "met prefetch stats: hits={}, misses={}",
+        prefetch_hits, prefetch_misses
+    );
+    eprintln!(
+        "met load timing: init={:.2}ms prefetch_wait={:.2}ms sync_wait={:.2}ms total_wait={:.2}ms",
+        init_load_ms,
+        met_wait_prefetch_ms,
+        met_wait_sync_ms,
+        met_wait_prefetch_ms + met_wait_sync_ms
     );
 
     let output = EtexOutput {

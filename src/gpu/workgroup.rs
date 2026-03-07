@@ -44,6 +44,17 @@ impl WorkgroupKernel {
         Self::WetDeposition,
         Self::ConcentrationGridding,
     ];
+    pub const ALL_KERNELS: [Self; 9] = [
+        Self::Advection,
+        Self::HannaParams,
+        Self::Langevin,
+        Self::DryDeposition,
+        Self::WetDeposition,
+        Self::ConcentrationGridding,
+        Self::PblReflection,
+        Self::PblDiagnostics,
+        Self::ParticleStep,
+    ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -281,11 +292,11 @@ fn parse_env_u32_csv(name: &str) -> Option<Vec<u32>> {
 fn runtime_config_overrides() -> WorkgroupSizeConfig {
     let mut config = WorkgroupSizeConfig::default();
     if let Some(default_size) = parse_env_u32("FLEXPART_WG_SIZE_DEFAULT") {
-        for kernel in WorkgroupKernel::KEY_KERNELS {
+        for kernel in WorkgroupKernel::ALL_KERNELS {
             config.set_for_kernel(kernel, default_size);
         }
     }
-    for kernel in WorkgroupKernel::KEY_KERNELS {
+    for kernel in WorkgroupKernel::ALL_KERNELS {
         let env_name = format!("FLEXPART_WG_SIZE_{}", kernel.env_suffix());
         if let Some(size_x) = parse_env_u32(&env_name) {
             config.set_for_kernel(kernel, size_x);
@@ -530,10 +541,8 @@ fn resolved_runtime_workgroup_config(ctx: &GpuContext) -> WorkgroupSizeConfig {
             if let Ok(Some(report)) = load_cached_autotune_report(&path, ctx) {
                 config = report.to_config();
                 let overrides = runtime_config_overrides();
-                for kernel in WorkgroupKernel::KEY_KERNELS {
-                    if let Some(value) = overrides.sizes.get(&kernel) {
-                        config.set_for_kernel(kernel, *value);
-                    }
+                for (kernel, value) in &overrides.sizes {
+                    config.set_for_kernel(*kernel, *value);
                 }
             }
         }

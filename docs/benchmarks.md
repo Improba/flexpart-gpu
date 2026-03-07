@@ -177,7 +177,10 @@ concentration_gridding — each with GPU and CPU variants.
 | `FLEXPART_BENCH_AUTOTUNE_PARTICLES` | min(MAX, 250k) | Particle count for auto-tuning harness. |
 | `FLEXPART_BENCH_AUTOTUNE_CANDIDATES` | — | Comma-separated candidate workgroup sizes. |
 | `FLEXPART_WG_AUTOTUNE_DETERMINISTIC` | `1` | Deterministic tie-breaking in auto-tune. |
+| `FLEXPART_WG_AUTOTUNE_DISABLE_CACHE` | `0` | `1` = ignore saved autotune cache and use defaults/overrides only. |
 | `FLEXPART_WG_AUTOTUNE_CACHE` | `~/.cache/flexpart-gpu/…` | Override auto-tune cache path. |
+| `FLEXPART_WG_SIZE_DEFAULT` | — | Default workgroup size for all key kernels. |
+| `FLEXPART_WG_SIZE_<KERNEL>` | — | Per-kernel override (`ADVECTION`, `LANGEVIN`, `HANNA_PARAMS`, `DRY_DEPOSITION`, `WET_DEPOSITION`, `CONCENTRATION_GRIDDING`, `PBL_DIAGNOSTICS`, `PBL_REFLECTION`, `PARTICLE_STEP`). |
 | `FLEXPART_GPU_VALIDATION` | `0` | `1` = use separated Hanna → Langevin dispatches instead of fused production path. |
 
 If no GPU adapter is available, GPU groups emit a placeholder entry; CPU baselines still run.
@@ -191,6 +194,20 @@ In addition to the Criterion micro-benchmarks above, the project includes a
 binary and the `compare-fortran.sh` orchestration script. Both engines run on an
 identical synthetic scenario; comparison scripts produce statistical metrics and
 particle position comparisons.
+
+### Latest measured snapshots (prod GPU vs Fortran)
+
+Canonical 1M report:
+
+- [`benchmark-fortran-vs-gpu-current.md`](benchmarks/benchmark-fortran-vs-gpu-current.md)
+- Conservative speedup (all reps): **8.32x**
+- Warm steady-state speedup: **11.16x**
+
+Latest replicated 10M report:
+
+- [`benchmark-fortran-vs-gpu-10m-production-20260307.md`](benchmarks/benchmark-fortran-vs-gpu-10m-production-20260307.md)
+- Conservative speedup (all reps): **9.67x**
+- Warm steady-state speedup: **9.88x**
 
 ### Prerequisites
 
@@ -226,6 +243,31 @@ Measures per-step GPU compute time with deposition, spatially-varying met:
 
 ```bash
 PARTICLES=1000000 WARMUP_STEPS=5 MEASURE_STEPS=30 \
+  cargo run --release --bin bench-timeloop
+```
+
+Optional forcing shape toggle for `bench-timeloop`:
+
+```bash
+# Default: per-particle forcing vectors
+FORCING_MODE=per_particle cargo run --release --bin bench-timeloop
+
+# Uniform forcing values (same scalar for all particle slots)
+FORCING_MODE=uniform cargo run --release --bin bench-timeloop
+```
+
+Optional runtime workgroup override A/B:
+
+```bash
+# Use autotune cache/default runtime config
+PARTICLES=10000000 WARMUP_STEPS=3 MEASURE_STEPS=20 \
+  cargo run --release --bin bench-timeloop
+
+# Force explicit kernel sizes (example candidate pair)
+FLEXPART_WG_AUTOTUNE_DISABLE_CACHE=1 \
+FLEXPART_WG_SIZE_ADVECTION=128 \
+FLEXPART_WG_SIZE_LANGEVIN=256 \
+PARTICLES=10000000 WARMUP_STEPS=3 MEASURE_STEPS=20 \
   cargo run --release --bin bench-timeloop
 ```
 
@@ -278,6 +320,52 @@ scripts/compare-fortran.sh compose all
 scripts/compare-fortran.sh compose validate
 ```
 
+### Automated GPU performance profile (strict vs production)
+
+The same wrapper now supports a GPU-only performance action:
+
+```bash
+# Default: 1M particles, strict + production + profiled timeloop
+scripts/compare-fortran.sh compose perf
+
+# Optional overrides for faster smoke runs
+PERF_PARTICLES=100000 PERF_WARMUP_STEPS=1 PERF_MEASURE_STEPS=3 \
+  scripts/compare-fortran.sh compose perf
+```
+
+### ETEX streaming met prefetch A/B
+
+`etex-run` supports streaming meteorological snapshot prefetch with a runtime toggle:
+
+```bash
+# Prefetch enabled (default)
+ETEX_STREAM_PREFETCH=1 \
+  cargo run --release --bin etex-run
+
+# Prefetch disabled (A/B reference)
+ETEX_STREAM_PREFETCH=0 \
+  cargo run --release --bin etex-run
+```
+
+Use the same `PARTICLES` and `OUTPUT_PATH` settings for fair ON/OFF comparison.
+At the end of each run, `etex-run` reports:
+
+- `met prefetch stats: hits=<N>, misses=<M>`
+- `met load timing: init=<ms> prefetch_wait=<ms> sync_wait=<ms> total_wait=<ms>`
+
+This helps verify that asynchronous loading is actually used during bracket transitions.
+
+Recommended quick campaign (alternating OFF/ON):
+
+```bash
+for mode in 0 1 0 1 0 1; do
+  ETEX_STREAM_PREFETCH=$mode PARTICLES=50000 \
+  OUTPUT_PATH="target/etex/gpu_output_prefetch_${mode}.json" \
+  /usr/bin/time -f 'REAL_SECONDS=%e' \
+  cargo run --release --bin etex-run
+done
+```
+
 ### Environment variables for `fortran-validation`
 
 | Variable | Default | Description |
@@ -294,11 +382,13 @@ scripts/compare-fortran.sh compose validate
 | `WARMUP_STEPS` | `3` | Warm-up steps (not measured) |
 | `MEASURE_STEPS` | `20` | Steps to measure |
 | `TIMESTEP_SECONDS` | `1` | Simulation timestep |
+| `FORCING_MODE` | `per_particle` | `per_particle` or `uniform` forcing fields for deposition inputs |
 
 ### Reports
 
 Detailed benchmark results are in `docs/benchmarks/`:
 
-- [`benchmark-performance-scaling.md`](benchmarks/benchmark-performance-scaling.md) — particle count scaling (10K–1M), GPU vs Fortran serial, readback on/off, MPI context.
+- [`benchmark-fortran-vs-gpu-current.md`](benchmarks/benchmark-fortran-vs-gpu-current.md) — canonical replicated baseline for Fortran serial vs GPU production at 1M.
+- [`benchmark-fortran-vs-gpu-10m-production-20260307.md`](benchmarks/benchmark-fortran-vs-gpu-10m-production-20260307.md) — replicated Fortran serial vs GPU production campaign at 10M.
 - [`benchmark-1m-fortran-vs-gpu0.md`](benchmarks/benchmark-1m-fortran-vs-gpu0.md) — scientific comparison at 1M particles (clean aligned gridding, COM, correlation, known differences).
 - [`benchmark-scientific-validation.md`](benchmarks/benchmark-scientific-validation.md) — physics-focused validation report: advection, vertical/horizontal diffusion, vertical profile analysis, aligned physics inventory.

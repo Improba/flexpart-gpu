@@ -8,7 +8,7 @@ Architecture: Fused Hanna+Langevin production path
 
 Validate the scientific correctness of the Rust/WebGPU FLEXPART implementation
 against the reference Fortran FLEXPART 10.4 codebase. This document focuses on
-**physics fidelity**, not performance (see `benchmark-performance-scaling.md` for timings).
+**physics fidelity**, not performance (see `benchmark-fortran-vs-gpu-current.md` for timings).
 
 ## 2. Test configuration
 
@@ -152,7 +152,7 @@ is the correct scientific metric.
 1. **Advection**: perfect alignment (5.4 km / 115 km = 4.7% error).
 2. **Vertical diffusion**: near-perfect (Δz = +19 m, σ_z ratio = 0.92).
 3. **Mass conservation**: all 1M particles remain active throughout.
-4. **Performance**: 8.7x speedup over Fortran serial in production mode.
+4. **Performance**: 8.32x conservative speedup over Fortran serial in production mode (11.16x warm steady-state).
 
 ### What needs attention
 

@@ -10,6 +10,22 @@ This project re-implements FLEXPART components in Rust and WGSL, with a focus on
 - output comparison between the legacy implementation and the GPU port,
 - performance measurement at significant problem sizes.
 
+## Value beyond raw performance
+
+Beyond speedups, this codebase brings practical value for scientific and
+operational workflows:
+
+- **Shorter scenario turnaround**: faster runs make it easier to iterate on
+  hypotheses, boundary conditions, and sensitivity studies.
+- **More accessible operations**: strong throughput on a single GPU workstation
+  can reduce dependence on MPI clusters for many day-to-day campaigns.
+- **Reproducibility and auditability**: benchmark protocols, validation reports,
+  and comparison scripts are versioned and repeatable.
+- **Safer engineering surface**: Rust typing, explicit error handling, and test
+  coverage improve maintainability of a complex numerical pipeline.
+- **Structured migration path**: side-by-side comparison with legacy outputs
+  helps adopt GPU acceleration incrementally instead of requiring a hard switch.
+
 ## License and implications
 
 Upstream FLEXPART is distributed under `GPL-3.0-or-later`.
@@ -47,4 +63,4 @@ Full documentation index: [`docs/`](docs/README.md)
 ## Contact
 
 Sylvain Meylan (Improba)  
-Email: `A_RENSEIGNER`
+Email: sylvain.meylan@improba.fr

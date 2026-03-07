@@ -300,13 +300,28 @@ impl Default for ParticleForcingField {
 }
 
 impl ParticleForcingField {
-    fn materialize(
-        &self,
+    fn materialize_into<'a>(
+        &'a self,
         expected_len: usize,
         field: &'static str,
-    ) -> Result<Vec<f32>, TimeLoopError> {
+        scratch: &'a mut Vec<f32>,
+        cached_uniform_value: &mut Option<f32>,
+    ) -> Result<Option<&'a [f32]>, TimeLoopError> {
         match self {
-            Self::Uniform(value) => Ok(vec![*value; expected_len]),
+            Self::Uniform(value) => {
+                if cached_uniform_value
+                    .is_some_and(|prev| prev.to_bits() == value.to_bits())
+                    && scratch.len() == expected_len
+                {
+                    return Ok(None);
+                }
+                if scratch.len() != expected_len {
+                    scratch.resize(expected_len, 0.0);
+                }
+                scratch.fill(*value);
+                *cached_uniform_value = Some(*value);
+                Ok(Some(scratch.as_slice()))
+            }
             Self::PerParticle(values) => {
                 if values.len() != expected_len {
                     return Err(TimeLoopError::ForcingLengthMismatch {
@@ -315,7 +330,8 @@ impl ParticleForcingField {
                         actual: values.len(),
                     });
                 }
-                Ok(values.clone())
+                *cached_uniform_value = None;
+                Ok(Some(values.as_slice()))
             }
         }
     }
@@ -669,6 +685,18 @@ pub struct ForwardTimeLoopDriver {
     wet_deposition_io: WetDepositionIoBuffers,
     /// Wet deposition kernel (both production and validation paths).
     wet_deposition_dispatch_kernel: WetDepositionDispatchKernel,
+    /// Reusable CPU-side scratch buffer for dry deposition forcing.
+    dry_forcing_scratch: Vec<f32>,
+    /// Reusable CPU-side scratch buffer for wet scavenging forcing.
+    wet_scavenging_scratch: Vec<f32>,
+    /// Reusable CPU-side scratch buffer for wet precipitating fraction forcing.
+    wet_fraction_scratch: Vec<f32>,
+    /// Last uploaded uniform dry deposition velocity, if any.
+    dry_uniform_cached: Option<f32>,
+    /// Last uploaded uniform wet scavenging coefficient, if any.
+    wet_scavenging_uniform_cached: Option<f32>,
+    /// Last uploaded uniform wet precipitating fraction, if any.
+    wet_fraction_uniform_cached: Option<f32>,
     /// Active GRIB prefetch handle, if a background read is in flight.
     grib_prefetch: Option<GribPrefetchHandle>,
     /// Whether active-particle compaction is enabled (O-07).
@@ -786,6 +814,12 @@ impl ForwardTimeLoopDriver {
             dry_deposition_dispatch_kernel,
             wet_deposition_io,
             wet_deposition_dispatch_kernel,
+            dry_forcing_scratch: Vec::with_capacity(particle_capacity),
+            wet_scavenging_scratch: Vec::with_capacity(particle_capacity),
+            wet_fraction_scratch: Vec::with_capacity(particle_capacity),
+            dry_uniform_cached: None,
+            wet_scavenging_uniform_cached: None,
+            wet_fraction_uniform_cached: None,
             grib_prefetch: None,
             use_compaction,
             compaction_pipelines,
@@ -972,21 +1006,42 @@ impl ForwardTimeLoopDriver {
         if !skip_dry_deposition {
             let dry_velocity = forcing
                 .dry_deposition_velocity_m_s
-                .materialize(slot_count, "dry_deposition_velocity_m_s")?;
-            self.dry_deposition_io
-                .upload_deposition_velocity(&self.gpu_context, &dry_velocity)?;
+                .materialize_into(
+                    slot_count,
+                    "dry_deposition_velocity_m_s",
+                    &mut self.dry_forcing_scratch,
+                    &mut self.dry_uniform_cached,
+                )?;
+            if let Some(dry_velocity) = dry_velocity {
+                self.dry_deposition_io
+                    .upload_deposition_velocity(&self.gpu_context, dry_velocity)?;
+            }
         }
         if !skip_wet_deposition {
             let wet_scavenging = forcing
                 .wet_scavenging_coefficient_s_inv
-                .materialize(slot_count, "wet_scavenging_coefficient_s_inv")?;
+                .materialize_into(
+                    slot_count,
+                    "wet_scavenging_coefficient_s_inv",
+                    &mut self.wet_scavenging_scratch,
+                    &mut self.wet_scavenging_uniform_cached,
+                )?;
             let wet_fraction = forcing
                 .wet_precipitating_fraction
-                .materialize(slot_count, "wet_precipitating_fraction")?;
-            self.wet_deposition_io
-                .upload_scavenging_coefficient(&self.gpu_context, &wet_scavenging)?;
-            self.wet_deposition_io
-                .upload_precipitating_fraction(&self.gpu_context, &wet_fraction)?;
+                .materialize_into(
+                    slot_count,
+                    "wet_precipitating_fraction",
+                    &mut self.wet_fraction_scratch,
+                    &mut self.wet_fraction_uniform_cached,
+                )?;
+            if let Some(wet_scavenging) = wet_scavenging {
+                self.wet_deposition_io
+                    .upload_scavenging_coefficient(&self.gpu_context, wet_scavenging)?;
+            }
+            if let Some(wet_fraction) = wet_fraction {
+                self.wet_deposition_io
+                    .upload_precipitating_fraction(&self.gpu_context, wet_fraction)?;
+            }
         }
         let forcing_dur = t.map_or(Duration::ZERO, |t| t.elapsed());
         let dep_upload_dur = Duration::ZERO;
@@ -1421,6 +1476,18 @@ pub struct BackwardTimeLoopDriver {
     dry_deposition_dispatch_kernel: DryDepositionDispatchKernel,
     wet_deposition_io: WetDepositionIoBuffers,
     wet_deposition_dispatch_kernel: WetDepositionDispatchKernel,
+    /// Reusable CPU-side scratch buffer for dry deposition forcing.
+    dry_forcing_scratch: Vec<f32>,
+    /// Reusable CPU-side scratch buffer for wet scavenging forcing.
+    wet_scavenging_scratch: Vec<f32>,
+    /// Reusable CPU-side scratch buffer for wet precipitating fraction forcing.
+    wet_fraction_scratch: Vec<f32>,
+    /// Last uploaded uniform dry deposition velocity, if any.
+    dry_uniform_cached: Option<f32>,
+    /// Last uploaded uniform wet scavenging coefficient, if any.
+    wet_scavenging_uniform_cached: Option<f32>,
+    /// Last uploaded uniform wet precipitating fraction, if any.
+    wet_fraction_uniform_cached: Option<f32>,
 }
 
 impl BackwardTimeLoopDriver {
@@ -1494,6 +1561,12 @@ impl BackwardTimeLoopDriver {
             dry_deposition_dispatch_kernel,
             wet_deposition_io,
             wet_deposition_dispatch_kernel,
+            dry_forcing_scratch: Vec::with_capacity(particle_capacity),
+            wet_scavenging_scratch: Vec::with_capacity(particle_capacity),
+            wet_fraction_scratch: Vec::with_capacity(particle_capacity),
+            dry_uniform_cached: None,
+            wet_scavenging_uniform_cached: None,
+            wet_fraction_uniform_cached: None,
         })
     }
 
@@ -1590,21 +1663,42 @@ impl BackwardTimeLoopDriver {
         if !skip_dry_deposition {
             let dry_velocity = forcing
                 .dry_deposition_velocity_m_s
-                .materialize(slot_count, "dry_deposition_velocity_m_s")?;
-            self.dry_deposition_io
-                .upload_deposition_velocity(&self.gpu_context, &dry_velocity)?;
+                .materialize_into(
+                    slot_count,
+                    "dry_deposition_velocity_m_s",
+                    &mut self.dry_forcing_scratch,
+                    &mut self.dry_uniform_cached,
+                )?;
+            if let Some(dry_velocity) = dry_velocity {
+                self.dry_deposition_io
+                    .upload_deposition_velocity(&self.gpu_context, dry_velocity)?;
+            }
         }
         if !skip_wet_deposition {
             let wet_scavenging = forcing
                 .wet_scavenging_coefficient_s_inv
-                .materialize(slot_count, "wet_scavenging_coefficient_s_inv")?;
+                .materialize_into(
+                    slot_count,
+                    "wet_scavenging_coefficient_s_inv",
+                    &mut self.wet_scavenging_scratch,
+                    &mut self.wet_scavenging_uniform_cached,
+                )?;
             let wet_fraction = forcing
                 .wet_precipitating_fraction
-                .materialize(slot_count, "wet_precipitating_fraction")?;
-            self.wet_deposition_io
-                .upload_scavenging_coefficient(&self.gpu_context, &wet_scavenging)?;
-            self.wet_deposition_io
-                .upload_precipitating_fraction(&self.gpu_context, &wet_fraction)?;
+                .materialize_into(
+                    slot_count,
+                    "wet_precipitating_fraction",
+                    &mut self.wet_fraction_scratch,
+                    &mut self.wet_fraction_uniform_cached,
+                )?;
+            if let Some(wet_scavenging) = wet_scavenging {
+                self.wet_deposition_io
+                    .upload_scavenging_coefficient(&self.gpu_context, wet_scavenging)?;
+            }
+            if let Some(wet_fraction) = wet_fraction {
+                self.wet_deposition_io
+                    .upload_precipitating_fraction(&self.gpu_context, wet_fraction)?;
+            }
         }
 
         // ── Encode all GPU dispatches in a single command encoder ──────

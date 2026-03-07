@@ -29,6 +29,7 @@ Complete documentation for the `flexpart-gpu` project.
 
 | Document | Description |
 |----------|-------------|
-| [benchmarks/benchmark-performance-scaling.md](benchmarks/benchmark-performance-scaling.md) | Particle count scaling (10K–1M), GPU vs Fortran serial, readback cost, MPI context |
+| [benchmarks/benchmark-fortran-vs-gpu-current.md](benchmarks/benchmark-fortran-vs-gpu-current.md) | Canonical Fortran serial vs GPU production baseline (replicated 1M campaign) |
+| [benchmarks/benchmark-fortran-vs-gpu-10m-production-20260307.md](benchmarks/benchmark-fortran-vs-gpu-10m-production-20260307.md) | Replicated Fortran serial vs GPU production campaign at 10M particles |
 | [benchmarks/benchmark-1m-fortran-vs-gpu0.md](benchmarks/benchmark-1m-fortran-vs-gpu0.md) | Scientific comparison at 1M particles: partposit alignment, COM, vertical profile |
 | [benchmarks/benchmark-scientific-validation.md](benchmarks/benchmark-scientific-validation.md) | Physics validation: advection, Langevin, Hanna, aligned module inventory |

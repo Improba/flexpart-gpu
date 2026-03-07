@@ -6,8 +6,12 @@ Architecture: **Fused Hanna+Langevin** production path
 
 ## Executive summary
 
-- **Wall-clock time**: Fortran `33.08 s`, GPU readback-on `8.27 s`, readback-off `3.82 s`.
-- **GPU speedup**: **4.0x** (readback on) / **8.7x** (readback off, production mode).
+- **Current canonical performance baseline** (see `benchmark-fortran-vs-gpu-current.md`):
+  - Fortran serial mean: `24.55 s`
+  - GPU production mean (all reps): `2.95 s` (**8.32x**)
+  - GPU production mean (warm reps): `2.20 s` (**11.16x**)
+- Scientific comparison below is still based on the readback-compatible path
+  required to export particle states for alignment checks.
 - **Clean aligned comparison** (partposit → host-grid, same gridding operator):
   - Correlation: `0.483`
   - NRMSE: `21.61`
@@ -45,13 +49,13 @@ Architecture: **Fused Hanna+Langevin** production path
 - Stability: neutral (L⁻¹ = 0).
 - Sensible heat flux: 40 W/m².
 
-## Performance measurement
+## Performance measurement (canonical reference)
 
-| Engine | Total time | Time/step (24 dt) | Gain vs Fortran |
-|---|---:|---:|---:|
-| Fortran (serial) | `33.08 s` | `1.38 s` | reference |
-| GPU (readback on) | `8.27 s` | `0.34 s` | **4.0x** |
-| GPU (readback off) | `3.82 s` | `0.16 s` | **8.7x** |
+| Engine | Total time | Gain vs Fortran |
+|---|---:|---:|
+| Fortran (serial, mean) | `24.55 s` | reference |
+| GPU production (mean, all reps) | `2.95 s` | **8.32x** |
+| GPU production (mean, warm reps) | `2.20 s` | **11.16x** |
 
 ## Comparative results
 
@@ -205,8 +209,8 @@ cargo run --release --bin fortran-validation
 ## Short message
 
 "On a synthetic 1M-particle case (uniform wind, 6 h, point source), the fused
-Hanna+Langevin GPU production path is **8.7x** faster than Fortran 10.4 serial
-(3.82 s vs 33.08 s, RTX 4070 Laptop, production mode). The aligned particle
+Hanna+Langevin GPU production path is **8.32x** faster than Fortran 10.4 serial
+on the conservative replicated baseline (**11.16x** warm steady-state). The aligned particle
 position comparison shows: horizontal COM distance 5.4 km, vertical Δz = +19 m,
 σ_z ratio = 0.92. The remaining discrepancy is 2–2.5x stronger horizontal
 diffusion on the GPU side (53 vs 192 non-zero grid cells). Next step: align

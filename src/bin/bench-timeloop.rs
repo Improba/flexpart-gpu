@@ -16,6 +16,32 @@ const GRID_NX: usize = 64;
 const GRID_NY: usize = 64;
 const GRID_NZ: usize = 24;
 
+#[derive(Clone, Copy)]
+enum ForcingMode {
+    PerParticle,
+    Uniform,
+}
+
+impl ForcingMode {
+    fn from_env() -> Self {
+        match std::env::var("FORCING_MODE")
+            .unwrap_or_else(|_| "per_particle".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "uniform" => Self::Uniform,
+            _ => Self::PerParticle,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PerParticle => "per_particle",
+            Self::Uniform => "uniform",
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -31,11 +57,13 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
+    let forcing_mode = ForcingMode::from_env();
 
     eprintln!("=== bench-timeloop ===");
     eprintln!("particles:     {particle_count}");
     eprintln!("warmup_steps:  {warmup_steps}");
     eprintln!("measure_steps: {measure_steps}");
+    eprintln!("forcing_mode:  {}", forcing_mode.as_str());
 
     let mut raw = BTreeMap::new();
     raw.insert("lon_min".to_string(), "10.0".to_string());
@@ -110,19 +138,27 @@ fn main() {
         time_t1_seconds: driver.current_time_seconds() + 600,
     };
 
-    let forcing = ForwardStepForcing {
-        dry_deposition_velocity_m_s: ParticleForcingField::PerParticle(
-            deterministic_scalar_field(particle_count, 0.001, 0.00001, 23),
-        ),
-        wet_scavenging_coefficient_s_inv: ParticleForcingField::PerParticle(
-            deterministic_scalar_field(particle_count, 0.0005, 0.00001, 29),
-        ),
-        wet_precipitating_fraction: ParticleForcingField::PerParticle(
-            (0..particle_count)
-                .map(|idx| ((idx % 100) as f32) / 100.0)
-                .collect(),
-        ),
-        rho_grad_over_rho: 2.5e-4,
+    let forcing = match forcing_mode {
+        ForcingMode::PerParticle => ForwardStepForcing {
+            dry_deposition_velocity_m_s: ParticleForcingField::PerParticle(
+                deterministic_scalar_field(particle_count, 0.001, 0.00001, 23),
+            ),
+            wet_scavenging_coefficient_s_inv: ParticleForcingField::PerParticle(
+                deterministic_scalar_field(particle_count, 0.0005, 0.00001, 29),
+            ),
+            wet_precipitating_fraction: ParticleForcingField::PerParticle(
+                (0..particle_count)
+                    .map(|idx| ((idx % 100) as f32) / 100.0)
+                    .collect(),
+            ),
+            rho_grad_over_rho: 2.5e-4,
+        },
+        ForcingMode::Uniform => ForwardStepForcing {
+            dry_deposition_velocity_m_s: ParticleForcingField::Uniform(0.001),
+            wet_scavenging_coefficient_s_inv: ParticleForcingField::Uniform(0.0005),
+            wet_precipitating_fraction: ParticleForcingField::Uniform(0.5),
+            rho_grad_over_rho: 2.5e-4,
+        },
     };
 
     // Warmup

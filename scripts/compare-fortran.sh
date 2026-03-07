@@ -10,13 +10,16 @@ set -euo pipefail
 #   local    — run directly on host (needs gfortran, eccodes, python3)
 #
 # Usage:
-#   scripts/compare-fortran.sh [compose|nvidia|local] [setup|run|clean|all|validate]
+#   scripts/compare-fortran.sh [compose|nvidia|local] [setup|run|clean|all|validate|perf]
 #
 # Quick start:
 #   scripts/compare-fortran.sh compose all
 #
 # Scientific validation (Fortran vs GPU concentration comparison):
 #   scripts/compare-fortran.sh compose validate
+#
+# GPU performance profile (strict vs production + profiled timeloop):
+#   scripts/compare-fortran.sh compose perf
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -443,6 +446,51 @@ do_validate() {
 }
 
 # ---------------------------------------------------------------------------
+# PERF — GPU-only performance profile (strict vs production)
+# ---------------------------------------------------------------------------
+do_perf() {
+  local mode="$1"
+  mkdir -p "${PROJECT_ROOT}/target/validation"
+
+  local particles="${PERF_PARTICLES:-1000000}"
+  local warmup_steps="${PERF_WARMUP_STEPS:-5}"
+  local measure_steps="${PERF_MEASURE_STEPS:-30}"
+
+  log_info "GPU performance profile (mode=${mode}, particles=${particles})"
+  log_info "Output directory: target/validation/"
+
+  log_info "Run 1/3: strict GPU baseline (SYNC_READBACK=1)"
+  OUTPUT_PATH="${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_strict.json" \
+    PARTICLES="${particles}" \
+    SYNC_READBACK=1 \
+    /usr/bin/time -f 'REAL_SECONDS=%e' \
+    cargo run --release --bin fortran-validation 2>&1 \
+    | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_strict.log"
+
+  log_info "Run 2/3: production GPU baseline (SYNC_READBACK=0)"
+  OUTPUT_PATH=/dev/null \
+    PARTICLES="${particles}" \
+    SYNC_READBACK=0 \
+    /usr/bin/time -f 'REAL_SECONDS=%e' \
+    cargo run --release --bin fortran-validation 2>&1 \
+    | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_prod.log"
+
+  log_info "Run 3/3: profiled timeloop benchmark"
+  FLEXPART_GPU_PROFILE=1 \
+    PARTICLES="${particles}" \
+    WARMUP_STEPS="${warmup_steps}" \
+    MEASURE_STEPS="${measure_steps}" \
+    cargo run --release --bin bench-timeloop 2>&1 \
+    | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_timeloop_profile.log"
+
+  log_info "Performance profile complete."
+  echo "Generated logs:"
+  echo "  target/validation/perf_gpu_${particles}_strict.log"
+  echo "  target/validation/perf_gpu_${particles}_prod.log"
+  echo "  target/validation/perf_gpu_${particles}_timeloop_profile.log"
+}
+
+# ---------------------------------------------------------------------------
 # CLEAN
 # ---------------------------------------------------------------------------
 do_clean() {
@@ -469,8 +517,9 @@ case "$MODE" in
       run)      do_run      "$MODE" ;;
       clean)    do_clean    "$MODE" ;;
       validate) do_validate "$MODE" ;;
+      perf)     do_perf     "$MODE" ;;
       all)      do_setup "$MODE"; do_run "$MODE" ;;
-      *)        echo "Usage: $0 $MODE [setup|run|clean|all|validate]"; exit 2 ;;
+      *)        echo "Usage: $0 $MODE [setup|run|clean|all|validate|perf]"; exit 2 ;;
     esac
     ;;
   local)
