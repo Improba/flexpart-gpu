@@ -3,12 +3,19 @@
 This guide shows the simplest way to run an ETEX-style simulation
 with `flexpart-gpu`, without modifying the engine source code.
 
+The default quickstart is **GPU-only** and does **not** require a
+sibling `../flexpart` checkout.
+
 ## 1) Prerequisites
 
 - Rust toolchain (`cargo`)
 - Python 3 (+ `numpy`, `eccodes`, `cdsapi`)
-- Docker + Docker Compose (for Fortran comparison)
 - Copernicus CDS account (to download ERA5) with `~/.cdsapirc`
+
+Optional (only for Fortran comparison):
+
+- Docker + Docker Compose
+- sibling Fortran checkout at `../flexpart`
 
 Example `~/.cdsapirc`:
 
@@ -28,7 +35,7 @@ scripts/run-etex.sh status
 This command reports what is missing (ETEX data, ERA5, outputs already
 produced, etc.).
 
-## 3) Run the full pipeline (recommended for a first run)
+## 3) Run the GPU-only pipeline (recommended for a first run)
 
 ```bash
 scripts/run-etex.sh all
@@ -39,10 +46,9 @@ The script chains:
 1. parsing ETEX measurements,
 2. downloading ERA5,
 3. preparing FLEXPART meteorological files,
-4. running the Fortran reference (Docker),
-5. running `flexpart-gpu`,
-6. comparing against observations,
-7. generating the report.
+4. running `flexpart-gpu`,
+5. comparing against observations,
+6. generating the report.
 
 ## 4) Run and debug step by step
 
@@ -52,10 +58,21 @@ If `all` fails, run individual steps:
 scripts/run-etex.sh parse
 scripts/run-etex.sh download
 scripts/run-etex.sh prepare
-scripts/run-etex.sh fortran
 scripts/run-etex.sh gpu
 scripts/run-etex.sh compare
 scripts/run-etex.sh report
+```
+
+Optional Fortran step:
+
+```bash
+scripts/run-etex.sh fortran
+```
+
+Or run everything including Fortran in one go:
+
+```bash
+scripts/run-etex.sh all-with-fortran
 ```
 
 ## 5) Scenario configuration files
@@ -76,8 +93,11 @@ The pipeline writes mainly to `target/etex/`, including:
 
 - `gpu_output.json`
 - `comparison_report.json`
-- `fortran.log`
 - `gpu.log`
+
+When Fortran comparison is enabled, it also writes:
+
+- `fortran.log`
 
 ## 7) Practical notes
 

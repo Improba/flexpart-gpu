@@ -6,7 +6,7 @@ Complete documentation for the `flexpart-gpu` project.
 
 | Document | Description |
 |----------|-------------|
-| [quickstart.md](quickstart.md) | Run your first ETEX simulation in 10 minutes |
+| [quickstart.md](quickstart.md) | Run your first ETEX simulation (GPU-only quickstart) |
 | [development.md](development.md) | Build environment, Docker, testing, contributing |
 
 ## Architecture & Design

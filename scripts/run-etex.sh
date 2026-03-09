@@ -4,20 +4,23 @@ set -euo pipefail
 # ===========================================================================
 # ETEX-1 Real Data Validation Pipeline
 #
-# Complete workflow for Phase D scientific validation:
-#   1. Download ERA5 meteorological data (requires CDS account)
-#   2. Prepare FLEXPART-compatible input files
-#   3. Parse ETEX-1 station measurements
-#   4. Run FLEXPART Fortran reference (Docker)
-#   5. Run flexpart-gpu
-#   6. Compare both against observations
-#   7. Generate validation report
+# ETEX workflow for Phase D scientific validation:
+#   GPU-only default:
+#     1. Download ERA5 meteorological data (requires CDS account)
+#     2. Prepare FLEXPART-compatible input files
+#     3. Parse ETEX-1 station measurements
+#     4. Run flexpart-gpu
+#     5. Compare against observations
+#     6. Generate validation report
+#   Optional:
+#     - Run FLEXPART Fortran reference (Docker) for side-by-side comparison
 #
 # Usage:
 #   scripts/run-etex.sh [step]
 #
 # Steps:
-#   all          Run complete pipeline (default)
+#   all              Run GPU-only pipeline (default)
+#   all-with-fortran Run GPU pipeline + optional Fortran reference
 #   download     Download ERA5 data from CDS
 #   prepare      Prepare FLEXPART input from ERA5
 #   parse        Parse ETEX measurements
@@ -29,14 +32,14 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - CDS account with ~/.cdsapirc configured
-#   - Docker + docker-compose
 #   - Python 3 with eccodes, numpy, cdsapi
 #   - Rust toolchain (for flexpart-gpu)
+#   - Docker + docker-compose (optional, Fortran comparison only)
 # ===========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-FLEXPART_DIR="$(cd "${PROJECT_ROOT}/../flexpart" && pwd)"
+FLEXPART_DIR="${PROJECT_ROOT}/../flexpart"
 
 ETEX_DIR="${PROJECT_ROOT}/target/etex"
 ERA5_RAW="${ETEX_DIR}/era5_raw"
@@ -71,7 +74,7 @@ check_prereqs() {
         log_warn "numpy not found (needed for comparison)"
     fi
     if ! command -v docker &>/dev/null; then
-        log_warn "docker not found (needed for Fortran run)"
+        log_warn "docker not found (optional, only needed for Fortran comparison)"
     fi
     $ok
 }
@@ -137,6 +140,12 @@ step_parse() {
 # ---------------------------------------------------------------------------
 step_fortran() {
     log_step "Run FLEXPART Fortran"
+
+    if [ ! -d "${FLEXPART_DIR}" ] || [ ! -d "${FLEXPART_DIR}/src" ]; then
+        log_error "Fortran checkout not found at ${FLEXPART_DIR}"
+        log_error "Fortran step is optional. For GPU-only quickstart, run: scripts/run-etex.sh all"
+        return 1
+    fi
 
     if [ ! -d "${METEO_DIR}" ] || [ ! -f "${METEO_DIR}/AVAILABLE" ]; then
         log_error "Meteorological data not prepared. Run: scripts/run-etex.sh prepare"
@@ -325,6 +334,21 @@ case "${STEP}" in
         }
         if [ -f "${ERA5_RAW}/era5_pressure_levels.grib" ]; then
             step_prepare
+            step_gpu
+        fi
+        step_compare
+        step_report
+        ;;
+    all-with-fortran)
+        check_prereqs || true
+        step_parse
+        step_download || {
+            log_warn "ERA5 download failed (CDS credentials needed)."
+            log_warn "Pipeline will continue with available data."
+            log_warn "Run 'scripts/run-etex.sh status' to check requirements."
+        }
+        if [ -f "${ERA5_RAW}/era5_pressure_levels.grib" ]; then
+            step_prepare
             step_fortran
             step_gpu
         fi
@@ -332,7 +356,7 @@ case "${STEP}" in
         step_report
         ;;
     *)
-        echo "Usage: scripts/run-etex.sh [all|status|download|prepare|parse|fortran|gpu|compare|report]"
+        echo "Usage: scripts/run-etex.sh [all|all-with-fortran|status|download|prepare|parse|fortran|gpu|compare|report]"
         exit 2
         ;;
 esac

@@ -11,8 +11,6 @@ services:
     volumes:
       # Source code (bind mount — edits on host appear instantly in container)
       - .:/workspace/flexpart-gpu
-      # Fortran reference code (read-only for validation)
-      - ../flexpart:/workspace/flexpart:ro
       # Cargo build cache (named volume — survives between container runs)
       - cargo-home:/usr/local/cargo
       - cargo-target:/workspace/flexpart-gpu/target

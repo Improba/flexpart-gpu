@@ -172,7 +172,8 @@ See [quickstart.md](quickstart.md) for the step-by-step guide. Short version:
 
 ```bash
 scripts/run-etex.sh status    # check prerequisites
-scripts/run-etex.sh all       # full pipeline
+scripts/run-etex.sh all       # GPU-only pipeline
+scripts/run-etex.sh all-with-fortran  # optional Fortran comparison
 ```
 
 ## Available Binaries
@@ -190,7 +191,7 @@ scripts/run-etex.sh all       # full pipeline
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/run-etex.sh` | Complete ETEX validation pipeline |
+| `scripts/run-etex.sh` | ETEX pipeline (GPU-only by default, optional Fortran step) |
 | `scripts/compare-fortran.sh` | GPU vs Fortran synthetic comparison |
 | `scripts/gpu-preflight.sh` | GPU backend check (Docker wrapper) |
 | `scripts/validate-etex.sh` | ETEX validation runner |
