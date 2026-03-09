@@ -62,6 +62,10 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_step()  { echo -e "\n${BLUE}=== Step: $* ===${NC}"; }
 
+fortran_run_succeeded() {
+    [ -f "${ETEX_DIR}/fortran.log" ] && grep -q "CONGRATULATIONS" "${ETEX_DIR}/fortran.log" 2>/dev/null
+}
+
 # ---------------------------------------------------------------------------
 check_prereqs() {
     local ok=true
@@ -170,7 +174,9 @@ step_fortran() {
     fi
 
     mkdir -p "${FORTRAN_RUN}/options/SPECIES"
+    rm -rf "${FORTRAN_RUN}/output"
     mkdir -p "${FORTRAN_RUN}/output"
+    rm -f "${ETEX_DIR}/fortran.log"
 
     cat > "${FORTRAN_RUN}/pathnames" <<'PATHEOF'
 ./options/
@@ -259,7 +265,7 @@ step_compare() {
     fi
 
     local fortran_arg=""
-    if [ -d "${FORTRAN_RUN}/output" ]; then
+    if fortran_run_succeeded && [ -d "${FORTRAN_RUN}/output" ]; then
         fortran_arg="--fortran-output ${FORTRAN_RUN}/output"
     fi
 
@@ -297,7 +303,11 @@ step_status() {
     check_file "${ERA5_RAW}/era5_single_levels.grib"             "ERA5 single levels"
     check_file "${METEO_DIR}/AVAILABLE"                          "FLEXPART input prepared"
     check_file "${MEASUREMENTS}"                                 "Measurements parsed"
-    check_file "${FORTRAN_RUN}/output/header"                    "Fortran FLEXPART run"
+    if fortran_run_succeeded; then
+        echo -e "  ${GREEN}[OK]${NC}  Fortran FLEXPART run"
+    else
+        echo -e "  ${RED}[--]${NC}  Fortran FLEXPART run"
+    fi
     check_file "${GPU_OUTPUT}"                                   "GPU run"
     check_file "${REPORT}"                                       "Comparison report"
 

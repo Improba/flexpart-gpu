@@ -77,6 +77,11 @@ cargo run --bin gpu-preflight
 This prints the detected GPU adapter, backend, and runs a minimal compute
 shader smoke test.
 
+Interpretation tip:
+
+- Adapter `llvmpipe` / `Cpu` means CPU fallback (no physical GPU exposed).
+- Use `scripts/gpu-preflight.sh nvidia` when you need explicit NVIDIA passthrough in Docker.
+
 ## Running Tests
 
 ```bash
