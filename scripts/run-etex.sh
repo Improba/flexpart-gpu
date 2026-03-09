@@ -40,6 +40,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FLEXPART_DIR="${PROJECT_ROOT}/../flexpart"
+FORTRAN_DOCKER_DIR="${PROJECT_ROOT}/../flexpart-fortran-docker"
 
 ETEX_DIR="${PROJECT_ROOT}/target/etex"
 ERA5_RAW="${ETEX_DIR}/era5_raw"
@@ -141,8 +142,24 @@ step_parse() {
 step_fortran() {
     log_step "Run FLEXPART Fortran"
 
+    if ! command -v docker &>/dev/null; then
+        log_error "docker not found. Fortran step requires Docker."
+        log_error "Fortran step is optional. For GPU-only quickstart, run: scripts/run-etex.sh all"
+        return 1
+    fi
+    if ! docker compose version &>/dev/null; then
+        log_error "docker compose is not available."
+        log_error "Fortran step is optional. For GPU-only quickstart, run: scripts/run-etex.sh all"
+        return 1
+    fi
+
     if [ ! -d "${FLEXPART_DIR}" ] || [ ! -d "${FLEXPART_DIR}/src" ]; then
         log_error "Fortran checkout not found at ${FLEXPART_DIR}"
+        log_error "Fortran step is optional. For GPU-only quickstart, run: scripts/run-etex.sh all"
+        return 1
+    fi
+    if [ ! -f "${FORTRAN_DOCKER_DIR}/docker-compose.yml" ]; then
+        log_error "Fortran Docker compose not found at ${FORTRAN_DOCKER_DIR}/docker-compose.yml"
         log_error "Fortran step is optional. For GPU-only quickstart, run: scripts/run-etex.sh all"
         return 1
     fi
@@ -180,10 +197,10 @@ PATHEOF
 
     log_info "Building Docker images..."
     cd "${PROJECT_ROOT}"
-    docker compose build flexpart-fortran
+    docker compose -f "${FORTRAN_DOCKER_DIR}/docker-compose.yml" build flexpart-fortran
 
     log_info "Compiling FLEXPART Fortran..."
-    docker compose run --rm \
+    docker compose -f "${FORTRAN_DOCKER_DIR}/docker-compose.yml" run --rm \
         -v "${ETEX_DIR}:/workspace/etex" \
         flexpart-fortran bash -c "
             cd ${C_FLEXPART}/src && make clean 2>/dev/null; \
@@ -196,7 +213,7 @@ PATHEOF
         "
 
     log_info "Running FLEXPART Fortran (ETEX-1)..."
-    docker compose run --rm \
+    docker compose -f "${FORTRAN_DOCKER_DIR}/docker-compose.yml" run --rm \
         -v "${ETEX_DIR}:/workspace/etex" \
         flexpart-fortran bash -c "
             cd /workspace/etex/fortran_run && ${C_FLEXPART}/src/FLEXPART

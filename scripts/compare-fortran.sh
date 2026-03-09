@@ -24,8 +24,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-FLEXPART_DIR="$(cd "${PROJECT_ROOT}/../flexpart" && pwd)"
-FORTRAN_DOCKER_DIR="$(cd "${PROJECT_ROOT}/../flexpart-fortran-docker" && pwd)"
+FLEXPART_DIR="${PROJECT_ROOT}/../flexpart"
+FORTRAN_DOCKER_DIR="${PROJECT_ROOT}/../flexpart-fortran-docker"
+GPU_COMPOSE_FILE="${PROJECT_ROOT}/docker/docker-compose.yml"
+GPU_NVIDIA_COMPOSE_FILE="${PROJECT_ROOT}/docker/docker-compose.nvidia.yml"
 
 C_FLEXPART="/workspace/flexpart"
 C_GPU="/workspace/flexpart-gpu"
@@ -36,6 +38,20 @@ log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
+require_fortran_stack() {
+  if [ ! -d "${FLEXPART_DIR}" ] || [ ! -d "${FLEXPART_DIR}/src" ]; then
+    log_error "Fortran checkout not found at ${FLEXPART_DIR}"
+    log_error "Clone FLEXPART as sibling directory to use compare-fortran workflows."
+    return 1
+  fi
+  if [ ! -f "${FORTRAN_DOCKER_DIR}/docker-compose.yml" ]; then
+    log_error "Fortran Docker compose not found at ${FORTRAN_DOCKER_DIR}/docker-compose.yml"
+    log_error "Expected sibling repository: ../flexpart-fortran-docker"
+    return 1
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Fortran Docker is in a sibling directory (../flexpart-fortran-docker/)
 # GPU Docker is in this project
@@ -44,8 +60,8 @@ fortran_compose_cmd() { local m="$1"; shift
 }
 gpu_compose_cmd() { local m="$1"; shift
   case "$m" in
-    compose) docker compose "$@" ;;
-    nvidia)  docker compose -f docker-compose.yml -f docker-compose.nvidia.yml "$@" ;;
+    compose) docker compose -f "${GPU_COMPOSE_FILE}" "$@" ;;
+    nvidia)  docker compose -f "${GPU_COMPOSE_FILE}" -f "${GPU_NVIDIA_COMPOSE_FILE}" "$@" ;;
   esac
 }
 fortran_exec() { local m="$1"; shift; fortran_compose_cmd "$m" run --rm flexpart-fortran "$@"; }
@@ -460,28 +476,31 @@ do_perf() {
   log_info "Output directory: target/validation/"
 
   log_info "Run 1/3: strict GPU baseline (SYNC_READBACK=1)"
-  OUTPUT_PATH="${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_strict.json" \
-    PARTICLES="${particles}" \
+  gpu_exec "$mode" bash -c "
+    OUTPUT_PATH=${C_GPU}/target/validation/perf_gpu_${particles}_strict.json \
+    PARTICLES=${particles} \
     SYNC_READBACK=1 \
     /usr/bin/time -f 'REAL_SECONDS=%e' \
-    cargo run --release --bin fortran-validation 2>&1 \
-    | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_strict.log"
+    cargo run --release --bin fortran-validation
+  " 2>&1 | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_strict.log"
 
   log_info "Run 2/3: production GPU baseline (SYNC_READBACK=0)"
-  OUTPUT_PATH=/dev/null \
-    PARTICLES="${particles}" \
+  gpu_exec "$mode" bash -c "
+    OUTPUT_PATH=/dev/null \
+    PARTICLES=${particles} \
     SYNC_READBACK=0 \
     /usr/bin/time -f 'REAL_SECONDS=%e' \
-    cargo run --release --bin fortran-validation 2>&1 \
-    | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_prod.log"
+    cargo run --release --bin fortran-validation
+  " 2>&1 | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_prod.log"
 
   log_info "Run 3/3: profiled timeloop benchmark"
-  FLEXPART_GPU_PROFILE=1 \
-    PARTICLES="${particles}" \
-    WARMUP_STEPS="${warmup_steps}" \
-    MEASURE_STEPS="${measure_steps}" \
-    cargo run --release --bin bench-timeloop 2>&1 \
-    | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_timeloop_profile.log"
+  gpu_exec "$mode" bash -c "
+    FLEXPART_GPU_PROFILE=1 \
+    PARTICLES=${particles} \
+    WARMUP_STEPS=${warmup_steps} \
+    MEASURE_STEPS=${measure_steps} \
+    cargo run --release --bin bench-timeloop
+  " 2>&1 | tee "${PROJECT_ROOT}/target/validation/perf_gpu_${particles}_timeloop_profile.log"
 
   log_info "Performance profile complete."
   echo "Generated logs:"
@@ -512,6 +531,9 @@ ACTION="${2:-all}"
 case "$MODE" in
   compose|nvidia)
     cd "${PROJECT_ROOT}"
+    case "$ACTION" in
+      setup|run|all|validate) require_fortran_stack ;;
+    esac
     case "$ACTION" in
       setup)    do_setup    "$MODE" ;;
       run)      do_run      "$MODE" ;;

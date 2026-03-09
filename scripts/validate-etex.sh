@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+GPU_COMPOSE_FILE="${PROJECT_ROOT}/docker/docker-compose.yml"
+GPU_NVIDIA_COMPOSE_FILE="${PROJECT_ROOT}/docker/docker-compose.nvidia.yml"
 
 cd "${PROJECT_ROOT}"
 
@@ -41,10 +43,10 @@ case "${MODE}" in
     cargo run --bin etex-validation -- "${USER_ARGS[@]}"
     ;;
   compose)
-    docker compose run --rm flexpart-gpu cargo run --bin etex-validation -- "${USER_ARGS[@]}"
+    docker compose -f "${GPU_COMPOSE_FILE}" run --rm flexpart-gpu cargo run --bin etex-validation -- "${USER_ARGS[@]}"
     ;;
   nvidia)
-    docker compose -f docker-compose.yml -f docker-compose.nvidia.yml run --rm flexpart-gpu cargo run --bin etex-validation -- "${USER_ARGS[@]}"
+    docker compose -f "${GPU_COMPOSE_FILE}" -f "${GPU_NVIDIA_COMPOSE_FILE}" run --rm flexpart-gpu cargo run --bin etex-validation -- "${USER_ARGS[@]}"
     ;;
   *)
     echo "Unknown mode: ${MODE}" >&2

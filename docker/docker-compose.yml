@@ -1,8 +1,8 @@
 services:
   flexpart-gpu:
     build:
-      context: ./docker
-      dockerfile: Dockerfile.gpu
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
     image: flexpart-gpu:latest
     working_dir: /workspace/flexpart-gpu
     user: "${UID:-1000}:${GID:-1000}"
@@ -10,7 +10,7 @@ services:
     tty: true
     volumes:
       # Source code (bind mount — edits on host appear instantly in container)
-      - .:/workspace/flexpart-gpu
+      - ..:/workspace/flexpart-gpu
       # Cargo build cache (named volume — survives between container runs)
       - cargo-home:/usr/local/cargo
       - cargo-target:/workspace/flexpart-gpu/target

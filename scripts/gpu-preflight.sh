@@ -9,8 +9,16 @@ set -euo pipefail
 #
 # Modes:
 #   local   -> runs directly in the current environment
-#   compose -> runs in default docker-compose setup
-#   nvidia  -> runs with docker-compose.nvidia.yml overlay
+#   compose -> runs in default docker compose setup
+#   nvidia  -> runs with NVIDIA overlay compose file
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+GPU_COMPOSE_FILE="${PROJECT_ROOT}/docker/docker-compose.yml"
+GPU_NVIDIA_COMPOSE_FILE="${PROJECT_ROOT}/docker/docker-compose.nvidia.yml"
+
+cd "${PROJECT_ROOT}"
 
 MODE="${1:-local}"
 if [[ $# -gt 0 ]]; then
@@ -22,10 +30,10 @@ case "${MODE}" in
     cargo run --bin gpu-preflight -- "$@"
     ;;
   compose)
-    docker compose run --rm flexpart-gpu cargo run --bin gpu-preflight -- "$@"
+    docker compose -f "${GPU_COMPOSE_FILE}" run --rm flexpart-gpu cargo run --bin gpu-preflight -- "$@"
     ;;
   nvidia)
-    docker compose -f docker-compose.yml -f docker-compose.nvidia.yml run --rm flexpart-gpu cargo run --bin gpu-preflight -- "$@"
+    docker compose -f "${GPU_COMPOSE_FILE}" -f "${GPU_NVIDIA_COMPOSE_FILE}" run --rm flexpart-gpu cargo run --bin gpu-preflight -- "$@"
     ;;
   *)
     echo "Unknown mode: ${MODE}" >&2

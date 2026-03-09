@@ -187,10 +187,9 @@ flexpart-gpu/
 │   └── etex/                     # ETEX helper scripts (ERA5, obs parsing)
 │
 ├── docker/
-│   └── Dockerfile.gpu            # GPU build image (Ubuntu + Vulkan + Rust)
-│
-├── docker-compose.yml            # Default compose (any Vulkan GPU)
-└── docker-compose.nvidia.yml     # NVIDIA overlay
+│   ├── Dockerfile.gpu            # GPU build image (Ubuntu + Vulkan + Rust)
+│   ├── docker-compose.yml        # Default compose (any Vulkan GPU)
+│   └── docker-compose.nvidia.yml # NVIDIA overlay
 
 # Fortran Docker is in a separate sibling directory:
 # ../flexpart-fortran-docker/
@@ -250,7 +249,8 @@ Two images (in separate projects):
 | `flexpart-fortran` | `../flexpart-fortran-docker/Dockerfile` (sibling directory) | Fortran FLEXPART for oracle comparison |
 
 Named volumes (`cargo-home`, `cargo-target`) persist the Rust build cache
-between container restarts. See [development.md](development.md) for usage.
+between container restarts. Compose files are under `docker/`. See
+[development.md](development.md) for usage.
 
 ## Relationship to Fortran FLEXPART
 

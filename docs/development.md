@@ -21,14 +21,18 @@
 ### Docker workflow
 
 ```bash
+# Compose files live in docker/
+GPU_COMPOSE="-f docker/docker-compose.yml"
+GPU_NVIDIA_COMPOSE="-f docker/docker-compose.yml -f docker/docker-compose.nvidia.yml"
+
 # Build the GPU image (one-time)
-docker compose build flexpart-gpu
+docker compose ${GPU_COMPOSE} build flexpart-gpu
 
 # Start a shell inside the container
-docker compose run --rm flexpart-gpu bash
+docker compose ${GPU_COMPOSE} run --rm flexpart-gpu bash
 
 # NVIDIA GPU variant
-docker compose -f docker-compose.yml -f docker-compose.nvidia.yml \
+docker compose ${GPU_NVIDIA_COMPOSE} \
   run --rm flexpart-gpu bash
 
 # Inside the container:
@@ -60,7 +64,7 @@ Verify that the GPU backend is working:
 
 ```bash
 # Docker
-docker compose run --rm flexpart-gpu cargo run --bin gpu-preflight
+docker compose -f docker/docker-compose.yml run --rm flexpart-gpu cargo run --bin gpu-preflight
 
 # Or via helper script
 scripts/gpu-preflight.sh compose

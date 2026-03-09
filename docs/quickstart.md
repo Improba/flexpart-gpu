@@ -17,6 +17,11 @@ Optional (only for Fortran comparison):
 - Docker + Docker Compose
 - sibling Fortran checkout at `../flexpart`
 
+Optional (for GPU execution inside Docker):
+
+- `docker/docker-compose.yml` (default GPU container)
+- `docker/docker-compose.nvidia.yml` (NVIDIA overlay)
+
 Example `~/.cdsapirc`:
 
 ```yaml
@@ -108,7 +113,27 @@ When Fortran comparison is enabled, it also writes:
 - If CDS credentials are missing, the pipeline may stop at the ERA5
   download step.
 
-## 8) Further reading
+## 8) Optional Docker usage (GPU path)
+
+From the `flexpart-gpu` root:
+
+```bash
+# Default containerized GPU run
+docker compose -f docker/docker-compose.yml run --rm flexpart-gpu bash
+
+# NVIDIA containerized GPU run
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.nvidia.yml \
+  run --rm flexpart-gpu bash
+```
+
+Helper wrappers (recommended):
+
+```bash
+scripts/gpu-preflight.sh compose
+scripts/gpu-preflight.sh nvidia
+```
+
+## 9) Further reading
 
 - Benchmarks: `docs/benchmarks.md`
 - Validation report: `docs/validation-report.md`
